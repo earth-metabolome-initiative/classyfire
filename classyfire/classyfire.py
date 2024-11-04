@@ -168,9 +168,9 @@ class ClassyFire:
                 self.build_url(inchikey),
                 timeout=self._timeout,
             )
+            self._last_request_time = int(time.time())
             response.raise_for_status()
             response_json: Dict = response.json()
-            self._last_request_time = int(time.time())
 
             if "report" in response_json and any(
                 "multiple radicals" in report.lower()
