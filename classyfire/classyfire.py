@@ -116,22 +116,24 @@ class ClassyFire:
         self._behavior_on_empty_classification = behavior_on_empty_classification
         self._verbose = verbose
         self._session = requests.Session()
-        self._session.headers.update({
-            "User-Agent": self._user_agent,
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "Accept-Language": "en-US,en;q=0.5",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-            "DNT": "1",  # Do Not Track
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Sec-Fetch-User": "?1",
-            "Pragma": "no-cache",
-            "Cache-Control": "no-cache",
-        })
+        self._session.headers.update(
+            {
+                "User-Agent": self._user_agent,
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
+                "DNT": "1",  # Do Not Track
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Pragma": "no-cache",
+                "Cache-Control": "no-cache",
+            }
+        )
         self._last_request_time = 0
 
     def build_url(self, inchikey: str) -> str:

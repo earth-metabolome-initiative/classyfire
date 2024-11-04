@@ -18,7 +18,6 @@ def test_classyfire():
     assert compound.inchikey == "InChIKey=BSYNRYMUTXBXSQ-UHFFFAOYSA-N"
 
 
-
 def test_classify_multiple():
     """Test the ClassyFire client."""
     classyfire = ClassyFire()

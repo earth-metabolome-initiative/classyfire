@@ -25,9 +25,14 @@ def test_classify_inchikey():
     assert expected == Compound.from_dict(compress_json.load(output))
 
 
-def test_classify_csv():
+def test_classify_csv() -> None:
     """Test classify_csv command."""
-    expected: List[Dict[str, Compound]] = list(ClassyFire().classify_csv("tests/example.csv"))
+    expected: List[Dict[str, Compound]] = list(
+        ClassyFire().classify_csv("tests/example.csv")
+    )
+    expected_dict = [
+        compound.to_dict() for compounds in expected for compound in compounds.values()
+    ]
     output = "output.json"
     subprocess.run(
         [
@@ -40,12 +45,6 @@ def test_classify_csv():
     )
     assert os.path.exists(output)
 
-    loaded: List[Dict[str, Compound]] = [
-        {
-            column_name: Compound.from_dict(compound)
-            for column_name, compound in compounds.items()
-        }
-        for compounds in compress_json.load(output)
-    ]
+    loaded = compress_json.load(output)
 
-    assert expected == loaded
+    assert expected_dict == loaded

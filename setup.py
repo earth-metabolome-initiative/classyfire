@@ -66,7 +66,7 @@ setup(
         "fake_useragent",
         "cache_decorator",
         "rdkit",
-        "matchms"
+        "matchms",
     ],
     extras_require=extras,
     entry_points={

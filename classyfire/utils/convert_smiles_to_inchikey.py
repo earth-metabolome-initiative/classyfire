@@ -22,9 +22,9 @@ def convert_smiles_to_inchikey(smiles: str) -> str:
         The InChIKey string.
     """
     # Suppress RDKit warnings
-    RDLogger.DisableLog("rdApp.error") # type: ignore
+    RDLogger.DisableLog("rdApp.error")  # type: ignore
     mol: Mol = MolFromSmiles(smiles)
     inchikey: str = MolToInchiKey(mol)
     # Re-enable RDKit warnings
-    RDLogger.EnableLog("rdApp.error") # type: ignore
+    RDLogger.EnableLog("rdApp.error")  # type: ignore
     return inchikey
