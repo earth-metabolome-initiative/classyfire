@@ -198,7 +198,14 @@ class ClassyFire:
             # response, the server returns a 404 error. In this case, we should treat
             # it as an empty classification and raise an EmptyInchikeyClassification
             # exception.
-            if http_error.response.status_code == 404:
+            if http_error.response.status_code in (404, 429, 500):
+                if http_error.response.status_code == 429:
+                    _sleeping_loading_bar(
+                        self._sleep,
+                        "We got scolded, let's wait a minute.",
+                        self._verbose,
+                    )
+
                 if self._behavior_on_empty_classification == "warn":
                     warnings.warn(f"Empty classification for InChIKey: {inchikey}")
                 elif self._behavior_on_empty_classification == "ignore":
