@@ -1,9 +1,9 @@
 # ClassyFire API Client
 
-[![pip](https://badge.fury.io/py/classyfire.svg)](https://pypi.org/project/classyfire/)
+<!-- [![pip](https://badge.fury.io/py/classyfire.svg)](https://pypi.org/project/classyfire/)
 [![python](https://img.shields.io/pypi/pyversions/classyfire)](https://pypi.org/project/classyfire/)
 [![license](https://img.shields.io/pypi/l/classyfire)](https://pypi.org/project/classyfire/)
-[![downloads](https://pepy.tech/badge/classyfire)](https://pepy.tech/project/classyfire)
+[![downloads](https://pepy.tech/badge/classyfire)](https://pepy.tech/project/classyfire) -->
 [![Github Actions](https://github.com/LucaCappelletti94/classyfire/actions/workflows/python.yml/badge.svg)](https://github.com/LucaCappelletti94/classyfire/actions/)
 
 A Python package to classify chemical entities using the [ClassyFire API](http://classyfire.wishartlab.com). This package provides a simple interface to retrieve the chemical classification of compounds by their InChIKey or SMILES, which are automatically cached to avoid redundant requests to the ClassyFire API. Caching ensures that repeated queries for the same InChIKey or SMILES are faster and more efficient, not requiring additional network calls or waiting time.
