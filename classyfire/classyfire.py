@@ -201,7 +201,7 @@ class ClassyFire:
             if http_error.response.status_code in (404, 429, 500):
                 if http_error.response.status_code == 429:
                     _sleeping_loading_bar(
-                        self._sleep,
+                        60,
                         "We got scolded, let's wait a minute.",
                         self._verbose,
                     )
