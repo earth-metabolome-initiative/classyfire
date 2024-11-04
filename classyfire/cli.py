@@ -32,7 +32,7 @@ def build_parser():
     parser.add_argument(
         "--sleep",
         type=int,
-        default=5,
+        default=10,
         help="Sleep time between requests",
     )
     parser.add_argument(

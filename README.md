@@ -24,7 +24,7 @@ pip install git+https://github.com/LucaCappelletti94/classyfire
 
 ## Usage
 
-To use the `ClassyFire` client, first instantiate it with optional parameters like `timeout`, `sleep`. **Note that the API documentation specifies to not execute more than 12 requests per minute, so you should not set a `sleep` parameter smaller than `60/12=5`**
+To use the `ClassyFire` client, first instantiate it with optional parameters like `timeout`, `sleep`. **Note that the API documentation specifies to not execute more than 12 requests per minute, so you should not set a `sleep` parameter smaller than `60/12=5`.** Furthermore, in practice, the API will still blacklist you when you exceed 6 requests per minute, so you should set the `sleep` parameter to at least `10` to be safe.
 
 ```python
 from classyfire import ClassyFire, Compound
@@ -38,7 +38,7 @@ client: ClassyFire = ClassyFire(
     # Maximum time to wait for a response
     timeout = 10,
     # Time to wait between requests (in seconds)
-    sleep = 5,
+    sleep = 10,
     # What to do when the API returns an empty classification
     behavior_on_empty_classification="retry-last",
     # Whether to show a loading bar when fetching

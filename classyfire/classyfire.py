@@ -57,7 +57,7 @@ class ClassyFire:
         self,
         email: Optional[str] = None,
         timeout: int = 10,
-        sleep: int = 5,
+        sleep: int = 10,
         classification_attempts: int = 10,
         sleep_between_attempts: int = 10,
         behavior_on_empty_classification: str = "retry-last",
@@ -115,6 +115,23 @@ class ClassyFire:
         self._sleep_between_attempts = sleep_between_attempts
         self._behavior_on_empty_classification = behavior_on_empty_classification
         self._verbose = verbose
+        self._session = requests.Session()
+        self._session.headers.update({
+            "User-Agent": self._user_agent,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "DNT": "1",  # Do Not Track
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Pragma": "no-cache",
+            "Cache-Control": "no-cache",
+        })
         self._last_request_time = 0
 
     def build_url(self, inchikey: str) -> str:
@@ -145,14 +162,13 @@ class ClassyFire:
             _sleeping_loading_bar(
                 int(time_to_sleep), "Sleeping before request", self._verbose
             )
-            self._last_request_time = int(time.time())
-            response = requests.get(
+            response = self._session.get(
                 self.build_url(inchikey),
                 timeout=self._timeout,
-                headers={"Accept": "application/json", "User-Agent": self._user_agent},
             )
             response.raise_for_status()
             response_json: Dict = response.json()
+            self._last_request_time = int(time.time())
 
             if "report" in response_json and any(
                 "multiple radicals" in report.lower()
