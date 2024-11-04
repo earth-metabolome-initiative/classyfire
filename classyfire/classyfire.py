@@ -1,12 +1,18 @@
 """Submodule providing the ClassyFire class."""
 
-from typing import Optional, Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Tuple, cast, Optional
 import warnings
 import time
 import requests
 from typeguard import typechecked
-from fake_useragent import UserAgent
 from cache_decorator import Cache
+from matchms.importing import (
+    load_from_mgf,
+    load_from_msp,
+    load_from_mzml,
+    load_from_mzxml,
+)
+from matchms import Spectrum
 from tqdm.auto import tqdm, trange
 import pandas as pd
 from classyfire.exceptions import (
@@ -22,6 +28,7 @@ from classyfire.utils import (
     is_valid_smiles,
     convert_smiles_to_inchikey,
 )
+from classyfire.__version__ import __version__
 from classyfire.classification import Compound
 
 
@@ -48,9 +55,9 @@ class ClassyFire:
     @typechecked
     def __init__(
         self,
+        email: Optional[str] = None,
         timeout: int = 10,
         sleep: int = 5,
-        user_agent: Optional[UserAgent] = None,
         classification_attempts: int = 10,
         sleep_between_attempts: int = 10,
         behavior_on_empty_classification: str = "retry-last",
@@ -60,6 +67,10 @@ class ClassyFire:
 
         Parameters
         ----------
+        email : str
+            Email address to be used as part of the user agent so
+            that the server administrators can contact you in case
+            of issues.
         timeout : int, optional
             Timeout for the HTTP requests, by default 10
         sleep : int, optional
@@ -95,7 +106,11 @@ class ClassyFire:
 
         self._timeout = timeout
         self._sleep = sleep
-        self._user_agent: UserAgent = user_agent or UserAgent()
+        self._user_agent: str = (
+            f"ClassyFire/{__version__}"
+            if email is None
+            else f"ClassyFire/{__version__} ({email})"
+        )
         self._classification_attempts = classification_attempts
         self._sleep_between_attempts = sleep_between_attempts
         self._behavior_on_empty_classification = behavior_on_empty_classification
@@ -110,7 +125,7 @@ class ClassyFire:
         inchikey : str
             InChIKey of the chemical entity
         """
-        inchikey: str = inchikey.replace("InChIKey=", "")
+        inchikey = inchikey.replace("InChIKey=", "")
         if not is_valid_inchikey(inchikey):
             raise InvalidInchiKey(inchikey)
         return f"{ClassyFire.URL}/entities/{inchikey}.json"
@@ -128,26 +143,24 @@ class ClassyFire:
                 0, self._sleep - (time.time() - self._last_request_time)
             )
             _sleeping_loading_bar(
-                time_to_sleep, "Sleeping before request", self._verbose
+                int(time_to_sleep), "Sleeping before request", self._verbose
             )
-            self._last_request_time = time.time()
+            self._last_request_time = int(time.time())
             response = requests.get(
                 self.build_url(inchikey),
                 timeout=self._timeout,
-                headers={
-                    "Accept": "application/json",
-                    "User-Agent": self._user_agent.chrome,
-                },
+                headers={"Accept": "application/json", "User-Agent": self._user_agent},
             )
             response.raise_for_status()
-            response = response.json()
+            response_json: Dict = response.json()
 
-            if "report" in response and any(
-                "multiple radicals" in report.lower() for report in response["report"]
+            if "report" in response_json and any(
+                "multiple radicals" in report.lower()
+                for report in response_json["report"]
             ):
                 raise MultipleRadicalsOrAttachmentPointsNotSupported(inchikey)
 
-            if not response:
+            if not response_json:
                 if self._behavior_on_empty_classification == "warn":
                     warnings.warn(f"Empty classification for InChIKey: {inchikey}")
                 elif self._behavior_on_empty_classification == "ignore":
@@ -160,7 +173,7 @@ class ClassyFire:
                         )
                     raise EmptyInchikeyClassification(inchikey)
 
-            return response
+            return response_json
 
         except requests.exceptions.HTTPError as http_error:
             # Sometimes, when the classification fails, instead of returning an empty
@@ -329,7 +342,7 @@ class ClassyFire:
             Series containing the InChIKeys of the chemical entities
         """
         return {
-            column: (
+            cast(str, column): (
                 self.classify_inchikey(candidate_inchikey_or_smiles)
                 if is_valid_inchikey(candidate_inchikey_or_smiles)
                 else self.classify_smiles(candidate_inchikey_or_smiles)
@@ -366,7 +379,7 @@ class ClassyFire:
         ):
             try:
                 yield {
-                    column: (
+                    cast(str, column): (
                         self.classify_inchikey(candidate_inchikey_or_smiles)
                         if is_valid_inchikey(candidate_inchikey_or_smiles)
                         else self.classify_smiles(candidate_inchikey_or_smiles)
@@ -396,7 +409,7 @@ class ClassyFire:
                 for row, attempt in to_retry:
                     try:
                         yield {
-                            column: (
+                            cast(str, column): (
                                 self.classify_inchikey(candidate_inchikey_or_smiles)
                                 if is_valid_inchikey(candidate_inchikey_or_smiles)
                                 else self.classify_smiles(candidate_inchikey_or_smiles)
@@ -439,6 +452,115 @@ class ClassyFire:
         )
 
         return self.classify_series_list((row.iloc[0] for row in csv_reader))
+
+    @typechecked
+    def classify_spectra(self, spectra: Iterable[Spectrum]) -> Iterable[Compound]:
+        """Get the classification of a list of chemical entities from a MGF file.
+
+        Parameters
+        ----------
+        mgf_path : str
+            Path to the MGF file containing the InChIKeys of the chemical entities
+        """
+
+        inchikeys_to_retry: List[Tuple[str, int]] = []
+        smiles_to_retry: List[Tuple[str, int]] = []
+
+        for spectrum in tqdm(
+            spectra,
+            desc="Classifying Spectra",
+            unit="spectrum",
+            leave=False,
+            dynamic_ncols=True,
+            disable=not self._verbose,
+        ):
+            if "inchikey" in spectrum.metadata:
+                try:
+                    yield self.classify_inchikey(spectrum.metadata["inchikey"])
+                except EmptyInchikeyClassification as empty_inchikey_classification:
+                    if self._behavior_on_empty_classification == "retry-last":
+                        inchikeys_to_retry.append((spectrum.metadata["inchikey"], 1))
+                    else:
+                        raise empty_inchikey_classification
+            elif "smiles" in spectrum.metadata:
+                try:
+                    yield self.classify_smiles(spectrum.metadata["smiles"])
+                except EmptySMILESClassification as empty_smiles_classification:
+                    if self._behavior_on_empty_classification == "retry-last":
+                        smiles_to_retry.append((spectrum.metadata["smiles"], 1))
+                    else:
+                        raise empty_smiles_classification
+
+        if self._behavior_on_empty_classification == "retry-last":
+            while inchikeys_to_retry or smiles_to_retry:
+                _sleeping_loading_bar(
+                    self._sleep_between_attempts, "Sleeping before retry", self._verbose
+                )
+                new_inchikey_to_retry: List[Tuple[str, int]] = []
+                for inchikey, attempt in inchikeys_to_retry:
+                    try:
+                        yield self.classify_inchikey(inchikey)
+                    except EmptyInchikeyClassification as empty_inchikey_classification:
+                        if attempt < self._classification_attempts:
+                            new_inchikey_to_retry.append((inchikey, attempt + 1))
+                        else:
+                            raise empty_inchikey_classification
+                inchikeys_to_retry = new_inchikey_to_retry
+
+                new_smiles_to_retry: List[Tuple[str, int]] = []
+                for smiles, attempt in smiles_to_retry:
+                    try:
+                        yield self.classify_smiles(smiles)
+                    except EmptySMILESClassification as empty_smiles_classification:
+                        if attempt < self._classification_attempts:
+                            new_smiles_to_retry.append((smiles, attempt + 1))
+                        else:
+                            raise empty_smiles_classification
+                smiles_to_retry = new_smiles_to_retry
+
+    @typechecked
+    def classify_mgf(self, mgf_path: str) -> Iterable[Compound]:
+        """Get the classification of a list of chemical entities from a MGF file.
+
+        Parameters
+        ----------
+        mgf_path : str
+            Path to the MGF file containing the InChIKeys of the chemical entities
+        """
+        return self.classify_spectra(load_from_mgf(mgf_path))
+
+    @typechecked
+    def classify_mzml(self, mzml_path: str) -> Iterable[Compound]:
+        """Get the classification of a list of chemical entities from a MZML file.
+
+        Parameters
+        ----------
+        mzml_path : str
+            Path to the MZML file containing the InChIKeys of the chemical entities
+        """
+        return self.classify_spectra(load_from_mzml(mzml_path))
+
+    @typechecked
+    def classify_mzxml(self, mzxml_path: str) -> Iterable[Compound]:
+        """Get the classification of a list of chemical entities from a MZXML file.
+
+        Parameters
+        ----------
+        mzxml_path : str
+            Path to the MZXML file containing the InChIKeys of the chemical entities
+        """
+        return self.classify_spectra(load_from_mzxml(mzxml_path))
+
+    @typechecked
+    def classify_msp(self, msp_path: str) -> Iterable[Compound]:
+        """Get the classification of a list of chemical entities from a MSP file.
+
+        Parameters
+        ----------
+        msp_path : str
+            Path to the MSP file containing the InChIKeys of the chemical entities
+        """
+        return self.classify_spectra(load_from_msp(msp_path))
 
     @typechecked
     def classify_df(self, df: pd.DataFrame) -> Iterable[Dict[str, Compound]]:

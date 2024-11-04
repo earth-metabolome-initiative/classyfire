@@ -166,3 +166,7 @@ test_readme.py
 readme_example.csv
 output.json.gz
 output.json
+matchms.mgf
+CID-SMILES.gz
+CID-SMILES
+CID-SMILES.tsv

@@ -1,6 +1,6 @@
 """CLI for the ClassyFire Python API."""
 
-from typing import List, Dict
+from typing import List, Dict, Iterable
 import argparse
 import os
 import json
@@ -15,7 +15,7 @@ def build_parser():
     parser.add_argument(
         "inchikey_or_smiles_or_path",
         type=str,
-        help="InChIKey or SMILES or path to a CSV (or TSV) file",
+        help="InChIKey or SMILES or path to a CSV (or TSV), MGF, mzML or MSP file",
     )
     parser.add_argument(
         "--timeout",
@@ -34,6 +34,13 @@ def build_parser():
         type=int,
         default=5,
         help="Sleep time between requests",
+    )
+    parser.add_argument(
+        "--email",
+        type=str,
+        required=False,
+        default=None,
+        help="Email to use for the User-Agent",
     )
     parser.add_argument(
         "--separator",
@@ -61,19 +68,23 @@ def build_parser():
 
 def is_valid_path(path_candidate: str) -> bool:
     """Check if the provided path is valid."""
-    return os.path.exists(path_candidate) and path_candidate.endswith((".csv", ".tsv", ".ssv"))
+    return os.path.exists(path_candidate) and path_candidate.lower().endswith(
+        (".csv", ".tsv", ".ssv", ".mgf", ".mzml", ".msp")
+    )
 
 
-def main():
+def main() -> None:
     """Main function."""
     parser = build_parser()
     args = parser.parse_args()
     classyfire = ClassyFire(
-        timeout=args.timeout, sleep=args.sleep, verbose=args.verbose
+        email=args.email, timeout=args.timeout, sleep=args.sleep, verbose=args.verbose
     )
 
     if is_valid_inchikey(args.inchikey_or_smiles_or_path):
-        compound: Compound = classyfire.classify_inchikey(args.inchikey_or_smiles_or_path)
+        compound: Compound = classyfire.classify_inchikey(
+            args.inchikey_or_smiles_or_path
+        )
         if args.output is not None:
             compress_json.dump(compound.to_dict(), args.output)
         else:
@@ -84,7 +95,7 @@ def main():
         return
 
     if is_valid_smiles(args.inchikey_or_smiles_or_path):
-        compound: Compound = classyfire.classify_smiles(args.inchikey_or_smiles_or_path)
+        compound = classyfire.classify_smiles(args.inchikey_or_smiles_or_path)
         if args.output is not None:
             compress_json.dump(compound.to_dict(), args.output)
         else:
@@ -94,7 +105,6 @@ def main():
                 print(json.dumps(compound.to_dict(), indent=2))
         return
 
-
     # We check that the provided argument is a valid path, or we have
     # to raise an exception to expain that the argument is not valid as
     # it does not seem to be neither an InChIKey nor a SMILES or a path
@@ -102,26 +112,39 @@ def main():
     if not is_valid_path(args.inchikey_or_smiles_or_path):
         raise ValueError(
             f"Invalid argument: {args.inchikey_or_smiles_or_path}. "
-            "It should be an InChIKey or a SMILES or a path to a CSV (or TSV or SSV) file."
+            "It should be an InChIKey or a SMILES or a path to a CSV (or TSV or SSV) file, "
+            "or an MGF, MSP, or mzML file."
         )
 
-    separator = args.separator
-
-    if args.inchikey_or_smiles_or_path.endswith(".tsv"):
-        separator = "\t"
-    elif args.inchikey_or_smiles_or_path.endswith(".ssv"):
-        separator = " "
-
-    compounds: List[Dict] = [
-        {column_name: compound.to_dict() for column_name, compound in compounds.items()}
-        for compounds in classyfire.classify_csv(
-            args.inchikey_or_smiles_or_path,
-            sep=separator,
-            header=not args.no_header,
+    if args.inchikey_or_smiles_or_path.endswith(".mgf"):
+        compounds: Iterable[Compound] = classyfire.classify_mgf(
+            args.inchikey_or_smiles_or_path
         )
-    ]
+    elif args.inchikey_or_smiles_or_path.endswith(".mzml"):
+        compounds = classyfire.classify_mgf(args.inchikey_or_smiles_or_path)
+    elif args.inchikey_or_smiles_or_path.endswith(".msp"):
+        compounds = classyfire.classify_mgf(args.inchikey_or_smiles_or_path)
+    else:
+        separator = args.separator
+
+        if args.inchikey_or_smiles_or_path.endswith(".tsv"):
+            separator = "\t"
+        elif args.inchikey_or_smiles_or_path.endswith(".ssv"):
+            separator = " "
+
+        compounds = (
+            compound
+            for compund_dict in classyfire.classify_csv(
+                args.inchikey_or_smiles_or_path,
+                sep=separator,
+                header=not args.no_header,
+            )
+            for compound in compund_dict.values()
+        )
+
+    compounds_list: List[Dict] = [compound.to_dict() for compound in compounds]
 
     if args.output is not None:
-        compress_json.dump(compounds, args.output)
+        compress_json.dump(compounds_list, args.output)
     else:
         print(json.dumps(compounds, ident=2))

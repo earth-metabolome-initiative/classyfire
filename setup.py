@@ -30,6 +30,9 @@ test_deps = [
     "pytest",
     "pytest-readme",
     "validate_version_code",
+    "types-requests",
+    "pandas-stubs",
+    "types-tqdm",
 ]
 
 extras = {
@@ -62,7 +65,8 @@ setup(
         "pandas",
         "fake_useragent",
         "cache_decorator",
-        "rdkit"
+        "rdkit",
+        "matchms"
     ],
     extras_require=extras,
     entry_points={

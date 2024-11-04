@@ -16,10 +16,10 @@ Furthermore, the package offers a CLI interface to classify InChIKeys or SMILES 
 
 ## Installation
 
-To install the package, use `pip`:
+To install the package, while we would really like to publish this package on PyPi, we are currently unable to do so due to the fact that the [PEP 541 Request being in limbo](https://github.com/pypi/support/issues/4935). As such, you can install the package from the GitHub repository using the following command:
 
 ```bash
-pip install classyfire
+pip install git+https://github.com/LucaCappelletti94/classyfire
 ```
 
 ## Usage
@@ -31,6 +31,10 @@ from classyfire import ClassyFire, Compound
 
 # Initialize the ClassyFire API client
 client: ClassyFire = ClassyFire(
+    # The email adress used to identify the user agent,
+    # so to allow the API maintainers to contact you
+    # in case of issues. This is just to be polite.
+    email="your.email.for@user.agent",
     # Maximum time to wait for a response
     timeout = 10,
     # Time to wait between requests (in seconds)
@@ -91,7 +95,9 @@ import pandas as pd
 from classyfire import ClassyFire
 
 # Initialize the ClassyFire API client
-client: ClassyFire = ClassyFire()
+client: ClassyFire = ClassyFire(
+    email="your.email.for@user.agent",
+)
 
 # Classify a CSV file, which in this example
 # is equal to the following DataFrame
@@ -205,10 +211,16 @@ Given a CSV file containing InChIKeys and/or SMILES, the CLI interface can be us
 To classify a CSV file containing InChIKeys, use the following command:
 
 ```bash
-classyfire tests/example.csv --verbose --separator "," --output "output.json.gz"
+classyfire tests/example.csv --verbose --separator "," --output "output.json.gz" --email "your.email.for@user.agent"
 ```
 
 Which will classify the InChIKeys in the file `tests/example.csv` and output the classifications to the file `output.json.gz`. The `--verbose` flag will show a progress bar, while the `--separator` flag specifies the separator used in the CSV file.
+
+It is possible also to process mass spectrometry spectra documents such as MGF, MSP, and mzML files. The CLI interface can be used to classify all InChIKeys and/or SMILES in the file. As described earlier, you can use the following command:
+
+```bash
+classyfire tests/example.mgf --verbose --output "output.json.gz" --email "your.email.for@user.agent"
+```
 
 ## License
 
