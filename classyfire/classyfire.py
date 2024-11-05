@@ -382,7 +382,7 @@ class ClassyFire:
 
     @typechecked
     def classify_series_list(
-        self, series_list: Iterable[pd.Series]
+        self, series_list: Iterable[pd.Series], total: Optional[int] = None
     ) -> Iterable[Dict[str, Compound]]:
         """Classify a list of pandas Series containing InChIKeys and/or SMILES.
 
@@ -390,6 +390,8 @@ class ClassyFire:
         ----------
         series_list : Iterable[pd.Series]
             List of Series containing the InChIKeys of the chemical entities
+        total : Optional[int], optional
+            Total number of rows in the Series, by default None
         """
 
         to_retry: List[Tuple[pd.Series, int]] = []
@@ -400,6 +402,7 @@ class ClassyFire:
             unit="row",
             leave=False,
             dynamic_ncols=True,
+            total=total,
             disable=not self._verbose,
         ):
             try:
@@ -458,7 +461,7 @@ class ClassyFire:
 
     @typechecked
     def classify_csv(
-        self, csv_path: str, sep: str = ",", header: bool = True
+        self, csv_path: str, sep: str = ",", header: bool = True, total: Optional[int] = None
     ) -> Iterable[Dict[str, Compound]]:
         """Get the classification of a list of chemical entities from a CSV file.
 
@@ -470,13 +473,15 @@ class ClassyFire:
             Separator used in the CSV file, by default ","
         header : bool, optional
             Whether the CSV file contains a header, by default True
+        total : Optional[int], optional
+            Total number of rows in the CSV file, by default None
         """
 
         csv_reader = pd.read_csv(
             csv_path, sep=sep, header=0 if header else None, iterator=True, chunksize=1
         )
 
-        return self.classify_series_list((row.iloc[0] for row in csv_reader))
+        return self.classify_series_list((row.iloc[0] for row in csv_reader), total=total)
 
     @typechecked
     def classify_spectra(self, spectra: Iterable[Spectrum]) -> Iterable[Compound]:

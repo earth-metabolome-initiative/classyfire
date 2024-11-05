@@ -30,6 +30,12 @@ def build_parser():
         help="Output path expected to be a JSON (with optional compression)",
     )
     parser.add_argument(
+        "--total",
+        type=int,
+        default=None,
+        help="Total number of compounds to classify",
+    )
+    parser.add_argument(
         "--sleep",
         type=int,
         default=10,
@@ -121,9 +127,11 @@ def main() -> None:
             args.inchikey_or_smiles_or_path
         )
     elif args.inchikey_or_smiles_or_path.endswith(".mzml"):
-        compounds = classyfire.classify_mgf(args.inchikey_or_smiles_or_path)
+        compounds = classyfire.classify_mzml(args.inchikey_or_smiles_or_path)
+    elif args.inchikey_or_smiles_or_path.endswith(".mzxml"):
+        compounds = classyfire.classify_mzxml(args.inchikey_or_smiles_or_path)
     elif args.inchikey_or_smiles_or_path.endswith(".msp"):
-        compounds = classyfire.classify_mgf(args.inchikey_or_smiles_or_path)
+        compounds = classyfire.classify_msp(args.inchikey_or_smiles_or_path)
     else:
         separator = args.separator
 
@@ -138,6 +146,7 @@ def main() -> None:
                 args.inchikey_or_smiles_or_path,
                 sep=separator,
                 header=not args.no_header,
+                total=args.total,
             )
             for compound in compund_dict.values()
         )
