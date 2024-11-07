@@ -124,14 +124,24 @@ def main() -> None:
 
     if args.inchikey_or_smiles_or_path.endswith(".mgf"):
         compounds: Iterable[Compound] = classyfire.classify_mgf(
-            args.inchikey_or_smiles_or_path
+            args.inchikey_or_smiles_or_path,
+            total=args.total,
         )
     elif args.inchikey_or_smiles_or_path.endswith(".mzml"):
-        compounds = classyfire.classify_mzml(args.inchikey_or_smiles_or_path)
+        compounds = classyfire.classify_mzml(
+            args.inchikey_or_smiles_or_path,
+            total=args.total,
+        )
     elif args.inchikey_or_smiles_or_path.endswith(".mzxml"):
-        compounds = classyfire.classify_mzxml(args.inchikey_or_smiles_or_path)
+        compounds = classyfire.classify_mzxml(
+            args.inchikey_or_smiles_or_path,
+            total=args.total,
+        )
     elif args.inchikey_or_smiles_or_path.endswith(".msp"):
-        compounds = classyfire.classify_msp(args.inchikey_or_smiles_or_path)
+        compounds = classyfire.classify_msp(
+            args.inchikey_or_smiles_or_path,
+            total=args.total,
+        )
     else:
         separator = args.separator
 

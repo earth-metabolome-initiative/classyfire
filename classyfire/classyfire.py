@@ -461,7 +461,11 @@ class ClassyFire:
 
     @typechecked
     def classify_csv(
-        self, csv_path: str, sep: str = ",", header: bool = True, total: Optional[int] = None
+        self,
+        csv_path: str,
+        sep: str = ",",
+        header: bool = True,
+        total: Optional[int] = None,
     ) -> Iterable[Dict[str, Compound]]:
         """Get the classification of a list of chemical entities from a CSV file.
 
@@ -481,16 +485,22 @@ class ClassyFire:
             csv_path, sep=sep, header=0 if header else None, iterator=True, chunksize=1
         )
 
-        return self.classify_series_list((row.iloc[0] for row in csv_reader), total=total)
+        return self.classify_series_list(
+            (row.iloc[0] for row in csv_reader), total=total
+        )
 
     @typechecked
-    def classify_spectra(self, spectra: Iterable[Spectrum]) -> Iterable[Compound]:
+    def classify_spectra(
+        self, spectra: Iterable[Spectrum], total: Optional[int] = None
+    ) -> Iterable[Compound]:
         """Get the classification of a list of chemical entities from a MGF file.
 
         Parameters
         ----------
         mgf_path : str
-            Path to the MGF file containing the InChIKeys of the chemical entities
+            Path to the MGF/mzML/mzXML file containing the InChIKeys of the chemical entities
+        total : Optional[int], optional
+            Total number of rows in the MGF/mzML/mzXML file, by default None
         """
 
         inchikeys_to_retry: List[Tuple[str, int]] = []
@@ -502,6 +512,7 @@ class ClassyFire:
             unit="spectrum",
             leave=False,
             dynamic_ncols=True,
+            total=total,
             disable=not self._verbose,
         ):
             if "inchikey" in spectrum.metadata:
@@ -549,48 +560,64 @@ class ClassyFire:
                 smiles_to_retry = new_smiles_to_retry
 
     @typechecked
-    def classify_mgf(self, mgf_path: str) -> Iterable[Compound]:
+    def classify_mgf(
+        self, mgf_path: str, total: Optional[int] = None
+    ) -> Iterable[Compound]:
         """Get the classification of a list of chemical entities from a MGF file.
 
         Parameters
         ----------
         mgf_path : str
             Path to the MGF file containing the InChIKeys of the chemical entities
+        total : Optional[int], optional
+            Total number of rows in the MGF file, by default None
         """
-        return self.classify_spectra(load_from_mgf(mgf_path))
+        return self.classify_spectra(load_from_mgf(mgf_path), total=total)
 
     @typechecked
-    def classify_mzml(self, mzml_path: str) -> Iterable[Compound]:
+    def classify_mzml(
+        self, mzml_path: str, total: Optional[int] = None
+    ) -> Iterable[Compound]:
         """Get the classification of a list of chemical entities from a MZML file.
 
         Parameters
         ----------
         mzml_path : str
             Path to the MZML file containing the InChIKeys of the chemical entities
+        total : Optional[int], optional
+            Total number of rows in the MZML file, by default
         """
-        return self.classify_spectra(load_from_mzml(mzml_path))
+        return self.classify_spectra(load_from_mzml(mzml_path), total=total)
 
     @typechecked
-    def classify_mzxml(self, mzxml_path: str) -> Iterable[Compound]:
+    def classify_mzxml(
+        self, mzxml_path: str, total: Optional[int] = None
+    ) -> Iterable[Compound]:
         """Get the classification of a list of chemical entities from a MZXML file.
 
         Parameters
         ----------
         mzxml_path : str
             Path to the MZXML file containing the InChIKeys of the chemical entities
+        total : Optional[int], optional
+            Total number of rows in the MZXML file, by default None
         """
-        return self.classify_spectra(load_from_mzxml(mzxml_path))
+        return self.classify_spectra(load_from_mzxml(mzxml_path), total=total)
 
     @typechecked
-    def classify_msp(self, msp_path: str) -> Iterable[Compound]:
+    def classify_msp(
+        self, msp_path: str, total: Optional[int] = None
+    ) -> Iterable[Compound]:
         """Get the classification of a list of chemical entities from a MSP file.
 
         Parameters
         ----------
         msp_path : str
             Path to the MSP file containing the InChIKeys of the chemical entities
+        total : Optional[int], optional
+            Total number of rows in the MSP file, by default None
         """
-        return self.classify_spectra(load_from_msp(msp_path))
+        return self.classify_spectra(load_from_msp(msp_path), total=total)
 
     @typechecked
     def classify_df(self, df: pd.DataFrame) -> Iterable[Dict[str, Compound]]:
