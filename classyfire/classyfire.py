@@ -60,7 +60,7 @@ class ClassyFire:
     def __init__(
         self,
         email: Optional[str] = None,
-        timeout: int = 10,
+        timeout: int = 30,
         sleep: int = 10,
         classification_attempts: int = 10,
         sleep_between_attempts: int = 10,
@@ -173,6 +173,9 @@ class ClassyFire:
 
             classification_response_json: Dict = classification_response.json()
 
+            if classification_response_json["classification_status"] == "In Queue":
+                raise ClassyFireAPIRequestError("Classification is still in queue")
+
             for entities in classification_response_json["entities"]:
                 if "report" in entities:
                     if entities["report"] is None:
@@ -183,17 +186,25 @@ class ClassyFire:
                         raise MultipleRadicalsOrAttachmentPointsNotSupported(
                             f"Multiple radicals or attachment points are not supported for {entities['smiles']}"
                         )
-                inchikey = convert_smiles_to_inchikey(entities["smiles"])
+                inchikey = entities["inchikey"]
                 inchikey = inchikey.replace("InChIKey=", "")
                 compress_json.dump(
                     entities,
                     os.path.join(self._classyfire_cache, f"{inchikey}.json"),
                 )
-            
+
             if len(classification_response_json["invalid_entities"]) > 0:
                 raise EmptySMILESClassification(
                     f"Classification of {classification_response_json['invalid_entities']} failed"
                 )
+
+        unclassified_smiles = [
+            s
+            for (inchikey, s) in zip(inchikeys, smiles)
+            if not self._is_classified(inchikey)
+        ]
+        if len(unclassified_smiles) > 0:
+            print(unclassified_smiles)
 
         return [
             Compound.from_dict(
@@ -248,14 +259,16 @@ class ClassyFire:
                             self._verbose,
                         )
                     failed_smiles.extend(batch)
-                except EmptySMILESClassification as empty_smiles_error:
+                except (
+                    EmptySMILESClassification,
+                    ClassyFireAPIRequestError,
+                ) as empty_smiles_error:
                     warnings.warn(str(empty_smiles_error))
                     failed_smiles.extend(batch)
                 except (
                     MultipleRadicalsOrAttachmentPointsNotSupported
                 ) as multiple_radicals_error:
                     warnings.warn(str(multiple_radicals_error))
-                    failed_smiles.extend(batch)
                 batch = []
 
         if len(batch) > 0:
@@ -281,6 +294,7 @@ class ClassyFire:
             except (
                 EmptySMILESClassification,
                 MultipleRadicalsOrAttachmentPointsNotSupported,
+                ClassyFireAPIRequestError,
             ):
                 pass
 

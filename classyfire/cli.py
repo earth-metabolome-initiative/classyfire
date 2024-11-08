@@ -20,7 +20,7 @@ def build_parser():
     parser.add_argument(
         "--timeout",
         type=int,
-        default=10,
+        default=30,
         help="Timeout for the HTTP requests",
     )
     parser.add_argument(
