@@ -188,6 +188,11 @@ class ClassyFire:
                     entities,
                     os.path.join(self._classyfire_cache, f"{inchikey}.json"),
                 )
+            
+            if "invalid_entities" in classification_response_json:
+                raise EmptySMILESClassification(
+                    f"Classification of {classification_response_json['invalid_entities']} failed"
+                )
 
         return [
             Compound.from_dict(
