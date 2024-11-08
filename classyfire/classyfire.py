@@ -184,12 +184,13 @@ class ClassyFire:
                             f"Multiple radicals or attachment points are not supported for {entities['smiles']}"
                         )
                 inchikey = convert_smiles_to_inchikey(entities["smiles"])
+                inchikey = inchikey.replace("InChIKey=", "")
                 compress_json.dump(
                     entities,
                     os.path.join(self._classyfire_cache, f"{inchikey}.json"),
                 )
             
-            if "invalid_entities" in classification_response_json:
+            if len(classification_response_json["invalid_entities"]) > 0:
                 raise EmptySMILESClassification(
                     f"Classification of {classification_response_json['invalid_entities']} failed"
                 )
