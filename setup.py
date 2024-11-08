@@ -64,7 +64,6 @@ setup(
         "dict_hash",
         "pandas",
         "fake_useragent",
-        "cache_decorator",
         "rdkit",
         "matchms",
     ],

@@ -1,5 +1,7 @@
 """Exceptions used in the ClassyFire package."""
 
+from typing import List
+
 
 class ClassyFireError(Exception):
     """Base exception for ClassyFire errors."""
@@ -21,14 +23,6 @@ class MultipleRadicalsOrAttachmentPointsNotSupported(ClassyFireError):
         super().__init__(
             f"Multiple radicals or attachment points not supported by ClassyFire: {smiles_or_inchikey}"
         )
-
-
-class EmptyInchikeyClassification(ClassyFireError):
-    """Empty classification exception."""
-
-    def __init__(self, inchikey: str):
-        """Empty classification exception."""
-        super().__init__(f"Empty classification for InChIKey: {inchikey}")
 
 
 class EmptySMILESClassification(ClassyFireError):

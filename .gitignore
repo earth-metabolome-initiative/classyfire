@@ -170,3 +170,4 @@ matchms.mgf
 CID-SMILES.gz
 CID-SMILES
 CID-SMILES.tsv
+*.ipynb

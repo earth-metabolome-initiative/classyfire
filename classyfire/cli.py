@@ -6,7 +6,7 @@ import os
 import json
 import compress_json
 from classyfire import ClassyFire, Compound
-from classyfire.utils import is_valid_inchikey, is_valid_smiles
+from classyfire.utils import is_valid_smiles
 
 
 def build_parser():
@@ -87,21 +87,8 @@ def main() -> None:
         email=args.email, timeout=args.timeout, sleep=args.sleep, verbose=args.verbose
     )
 
-    if is_valid_inchikey(args.inchikey_or_smiles_or_path):
-        compound: Compound = classyfire.classify_inchikey(
-            args.inchikey_or_smiles_or_path
-        )
-        if args.output is not None:
-            compress_json.dump(compound.to_dict(), args.output)
-        else:
-            if args.short:
-                print(compound)
-            else:
-                print(json.dumps(compound.to_dict(), indent=2))
-        return
-
     if is_valid_smiles(args.inchikey_or_smiles_or_path):
-        compound = classyfire.classify_smiles(args.inchikey_or_smiles_or_path)
+        compound = list(classyfire.classify_smiles(args.inchikey_or_smiles_or_path))[0]
         if args.output is not None:
             compress_json.dump(compound.to_dict(), args.output)
         else:
@@ -150,15 +137,11 @@ def main() -> None:
         elif args.inchikey_or_smiles_or_path.endswith(".ssv"):
             separator = " "
 
-        compounds = (
-            compound
-            for compund_dict in classyfire.classify_csv(
-                args.inchikey_or_smiles_or_path,
-                sep=separator,
-                header=not args.no_header,
-                total=args.total,
-            )
-            for compound in compund_dict.values()
+        compounds = classyfire.classify_csv(
+            args.inchikey_or_smiles_or_path,
+            sep=separator,
+            header=not args.no_header,
+            total=args.total,
         )
 
     compounds_list: List[Dict] = [compound.to_dict() for compound in compounds]
