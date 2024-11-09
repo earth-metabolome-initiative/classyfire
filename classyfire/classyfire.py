@@ -215,6 +215,16 @@ class ClassyFire:
                     invalid_smiles.add(smiles_candidate)
                     logging.error(f"Invalid SMILES: {smiles_candidate}")
                     break
+
+                if smiles_candidate in classified_smiles:
+                    continue
+                
+                if smiles_candidate in failed_smiles:
+                    continue
+
+                if smiles_candidate in multiple_radicals:
+                    continue
+
                 next_proxy = min(
                     self._last_request_times,
                     key=self._last_request_times.get,
