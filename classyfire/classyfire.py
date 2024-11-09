@@ -104,7 +104,8 @@ class ClassyFire:
             else []
         )
         for dead_proxy in self._dead_proxies:
-            self._proxies.remove(dead_proxy)
+            if dead_proxy in self._proxies:
+                self._proxies.remove(dead_proxy)
 
         self._classyfire_cache = directory
         self._verbose = verbose
