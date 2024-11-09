@@ -245,6 +245,7 @@ class ClassyFire:
                 except (
                     requests.exceptions.ProxyError,
                     requests.exceptions.ConnectTimeout,
+                    requests.exceptions.ConnectionError,
                     requests.exceptions.ReadTimeout,
                     requests.exceptions.ChunkedEncodingError,
                 ):
