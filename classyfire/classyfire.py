@@ -217,13 +217,13 @@ class ClassyFire:
                     break
 
                 if smiles_candidate in classified_smiles:
-                    continue
+                    break
                 
                 if smiles_candidate in failed_smiles:
-                    continue
+                    break
 
                 if smiles_candidate in multiple_radicals:
-                    continue
+                    break
 
                 next_proxy = min(
                     self._last_request_times,
