@@ -70,6 +70,7 @@ def _validate_proxy(proxy: str) -> bool:
         requests.exceptions.ReadTimeout,
         requests.exceptions.InvalidProxyURL,
         requests.exceptions.ChunkedEncodingError,
+        requests.exceptions.TooManyRedirects
     ):
         return False
 
@@ -303,6 +304,7 @@ class ClassyFire:
                     requests.exceptions.ConnectTimeout,
                     requests.exceptions.ConnectionError,
                     requests.exceptions.ReadTimeout,
+                    requests.exceptions.TooManyRedirects,
                     requests.exceptions.InvalidProxyURL,
                     requests.exceptions.ChunkedEncodingError,
                 ):
