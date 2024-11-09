@@ -1,9 +1,10 @@
 """Submodule providing the ClassyFire class."""
 
-from typing import Dict, Iterable, List, Tuple, cast, Optional, Union
+from typing import Dict, Iterable, List, Optional, Union, Set
 import warnings
 import time
 import os
+import logging
 import requests
 from requests.exceptions import HTTPError
 from typeguard import typechecked
@@ -18,6 +19,9 @@ from matchms import Spectrum
 from tqdm.auto import tqdm, trange
 import pandas as pd
 from dict_hash import sha256
+from rich.console import Console
+from rich.table import Table
+from humanize import naturaldelta
 from classyfire.exceptions import (
     ClassyFireAPIRequestError,
     InvalidSMILES,
@@ -54,67 +58,40 @@ class ClassyFire:
 
     BASE_URL = "http://classyfire.wishartlab.com"
     QUERY_URL = f"{BASE_URL}/queries"
+    QUERY_STATUS_URL = f"{BASE_URL}/queries/{{query_id}}/status.json"
     RESPONSE_URL_PATTERN = f"{BASE_URL}/queries/{{query_id}}.json"
+    INCHIKEY_URL_PATTERN = f"{BASE_URL}/entities/{{inchikey}}.json"
 
     @typechecked
     def __init__(
         self,
-        email: Optional[str] = None,
-        timeout: int = 30,
-        sleep: int = 10,
-        classification_attempts: int = 10,
-        sleep_between_attempts: int = 10,
-        chunk_size: int = 500,
+        timeout: int = 10,
+        sleep: int = 5,
         directory: str = "classyfire_cache",
         verbose: bool = False,
     ):
-        """ClassyFire API client.
-
-        Parameters
-        ----------
-        email : str
-            Email address to be used as part of the user agent so
-            that the server administrators can contact you in case
-            of issues.
-        timeout : int, optional
-            Timeout for the HTTP requests, by default 10
-        sleep : int, optional
-            Sleep time between requests, by default 5
-        user_agent : Optional[UserAgent], optional
-            User agent for the HTTP requests, by default None
-        classification_attempts : int, optional
-            Number of attempts to classify an InChIKey, by default 3.
-            This only applies when the behavior_on_empty_classification is set to "retry-last"
-        sleep_between_attempts : int, optional
-            Sleep time between classification attempts, by default 10
-        chunk_size : int,
-            Number of InChIKeys to classify in a single request, by default 100
-        classyfire_cache : str, optional
-            Directory to store the cache files, by default "classyfire_cache"
-        verbose : bool, optional
-            Whether to print verbose output, by default False
-        """
+        """ClassyFire API client."""
         self._timeout = timeout
         self._sleep = sleep
-        self._user_agent: str = (
-            f"ClassyFire/{__version__}"
-            if email is None
-            else f"ClassyFire/{__version__} ({email})"
+        self._proxies = requests.get(
+            "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt",
+            timeout=10,
+        ).text.split("\n")
+        self._dead_proxies = (
+            compress_json.load("dead_proxies.json")
+            if os.path.exists("dead_proxies.json")
+            else []
         )
-        self._classification_attempts = classification_attempts
-        self._sleep_between_attempts = sleep_between_attempts
-        self._chunk_size = chunk_size
+        for dead_proxy in self._dead_proxies:
+            self._proxies.remove(dead_proxy)
         self._classyfire_cache = directory
         self._verbose = verbose
-        self._session = requests.Session()
-        self._session.headers.update(
-            {
-                "User-Agent": self._user_agent,
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            }
+        logging.basicConfig(
+            level=logging.INFO if verbose else logging.ERROR,
+            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            filename="classyfire.log",
         )
-        self._last_request_time = 0
+        self._last_request_times: Dict[str, int] = {proxy: 0 for proxy in self._proxies}
 
     @typechecked
     def _is_classified(self, inchikey: str) -> bool:
@@ -122,98 +99,55 @@ class ClassyFire:
         return os.path.exists(os.path.join(self._classyfire_cache, f"{inchikey}.json"))
 
     @typechecked
-    def _classify_smiles(self, smiles: List[str]) -> List[Compound]:
+    def _classify_inchikey(
+        self, inchikey: str, proxy: Optional[str] = None
+    ) -> Compound:
         """Get the classification of a chemical entity."""
 
-        inchikeys: List[str] = convert_smiles_to_inchikeys(smiles)
-
-        unclassified_smiles: List[str] = [
-            s
-            for (inchikey, s) in zip(inchikeys, smiles)
-            if not self._is_classified(inchikey)
-        ]
-
-        if len(unclassified_smiles) > 0:
-            expected_label: str = sha256({"smiles": unclassified_smiles})
-
-            query_data: Dict[str, str] = {
-                "label": expected_label,
-                "query_input": "\n".join(unclassified_smiles),
-                "query_type": "STRUCTURE",
-            }
-
+        if not os.path.exists(os.path.join(self._classyfire_cache, f"{inchikey}.json")):
             time_to_sleep = max(
-                0, self._sleep - (time.time() - self._last_request_time)
+                0, self._sleep - (time.time() - self._last_request_times.get(proxy, 0))
             )
             _sleeping_loading_bar(
                 int(time_to_sleep), "Sleeping before request", self._verbose
             )
-            self._last_request_time = int(time.time())
-            query_response = self._session.post(
-                self.QUERY_URL,
-                json=query_data,
+            self._last_request_times[proxy] = int(time.time())
+            classification_response = requests.get(
+                self.INCHIKEY_URL_PATTERN.format(inchikey=inchikey),
                 timeout=self._timeout,
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                proxies=(
+                    {"http": f"http://{proxy}", "https": f"https://{proxy}"}
+                    if proxy
+                    else None
+                ),
             )
-            self._last_request_time = int(time.time())
-            query_response.raise_for_status()
-            query_response_json: Dict = query_response.json()
-
-            query_id: int = query_response_json["id"]
-
-            _sleeping_loading_bar(5, "Sleeping before classification", self._verbose)
-
-            self._last_request_time = int(time.time())
-            classification_response = self._session.get(
-                self.RESPONSE_URL_PATTERN.format(query_id=query_id),
-                timeout=self._timeout,
-            )
-            self._last_request_time = int(time.time())
-
+            self._last_request_times[proxy] = int(time.time())
             classification_response.raise_for_status()
+            classification_response_json = classification_response.json()
 
-            classification_response_json: Dict = classification_response.json()
-
-            if classification_response_json["classification_status"] == "In Queue":
-                raise ClassyFireAPIRequestError("Classification is still in queue")
-
-            for entities in classification_response_json["entities"]:
-                if "report" in entities:
-                    if entities["report"] is None:
-                        raise EmptySMILESClassification(
-                            f"Classification of {entities['smiles']} failed"
-                        )
-                    if "multiple radicals" in entities["report"].lower():
-                        raise MultipleRadicalsOrAttachmentPointsNotSupported(
-                            f"Multiple radicals or attachment points are not supported for {entities['smiles']}"
-                        )
-                inchikey = entities["inchikey"]
-                inchikey = inchikey.replace("InChIKey=", "")
-                compress_json.dump(
-                    entities,
-                    os.path.join(self._classyfire_cache, f"{inchikey}.json"),
+            if "report" in classification_response_json and any(
+                "multiple radicals" in entry.lower()
+                for entry in classification_response_json["report"]
+            ):
+                raise MultipleRadicalsOrAttachmentPointsNotSupported(
+                    f"Multiple radicals or attachment points are not supported for {inchikey}"
                 )
 
-            if len(classification_response_json["invalid_entities"]) > 0:
-                raise EmptySMILESClassification(
-                    f"Classification of {classification_response_json['invalid_entities']} failed"
-                )
+            assert "smiles" in classification_response_json
+            assert "inchikey" in classification_response_json
 
-        unclassified_smiles = [
-            s
-            for (inchikey, s) in zip(inchikeys, smiles)
-            if not self._is_classified(inchikey)
-        ]
-        if len(unclassified_smiles) > 0:
-            print(unclassified_smiles)
-
-        return [
-            Compound.from_dict(
-                compress_json.load(
-                    os.path.join(self._classyfire_cache, f"{inchikey}.json")
-                )
+            compress_json.dump(
+                classification_response_json,
+                os.path.join(self._classyfire_cache, f"{inchikey}.json"),
             )
-            for inchikey in inchikeys
-        ]
+
+        return Compound.from_dict(
+            compress_json.load(os.path.join(self._classyfire_cache, f"{inchikey}.json"))
+        )
 
     @typechecked
     def classify_smiles(
@@ -234,23 +168,69 @@ class ClassyFire:
         if isinstance(smiles, str):
             smiles = [smiles]
 
-        batch: List[str] = []
+        failed_smiles: Set[str] = set()
+        invalid_smiles: Set[str] = set()
+        multiple_radicals: Set[str] = set()
+        classified_smiles: Set[str] = set()
+        number_of_dead_proxies = 0
 
-        failed_smiles: List[str] = []
+        started = time.time()
 
-        for smiles in tqdm(
-            smiles,
-            desc="Classifying SMILES",
-            unit="SMILES",
-            leave=False,
-            dynamic_ncols=True,
-            total=total,
-            disable=not self._verbose,
-        ):
-            batch.append(smiles)
-            if len(batch) == self._chunk_size:
+        console = Console()
+        last_print = 0
+
+
+        for smiles_candidate in smiles:
+            while True:
+                if time.time() - last_print > 1:
+                    table = Table(title="ClassyFire Progress")
+                    table.add_column("Time Elapsed", justify="right")
+                    table.add_column("Invalid SMILES", justify="right")
+                    table.add_column("Failed SMILES", justify="right")
+                    table.add_column("Multiple Radicals", justify="right")
+                    table.add_column("Classified SMILES", justify="right")
+                    if self._proxies:
+                        table.add_column("Dead Proxies", justify="right")
+                        table.add_column("Total Proxies", justify="right")
+                    table.add_row(
+                        naturaldelta(time.time() - started),
+                        f"{len(invalid_smiles)}",
+                        f"{len(failed_smiles)}",
+                        f"{len(multiple_radicals)}",
+                        f"{len(classified_smiles)}",
+                        *(
+                            (
+                                f"{number_of_dead_proxies}",
+                                f"{len(self._proxies)}",
+                            )
+                            if self._proxies
+                            else ()
+                        ),
+                    )
+                    console.clear()
+                    console.print(table)
+                    last_print = time.time()
+
+                if not is_valid_smiles(smiles_candidate):
+                    invalid_smiles.add(smiles_candidate)
+                    logging.error(f"Invalid SMILES: {smiles_candidate}")
+                    break
+                next_proxy = min(
+                    self._last_request_times,
+                    key=self._last_request_times.get,
+                )
                 try:
-                    yield from self._classify_smiles(batch)
+                    classification = self._classify_inchikey(
+                        inchikey=convert_smiles_to_inchikey(smiles_candidate),
+                        proxy=next_proxy,
+                    )
+                    classified_smiles.add(smiles_candidate)
+                    yield classification
+                    break
+                except requests.exceptions.JSONDecodeError as json_error:
+                    failed_smiles.add(smiles_candidate)
+                    logging.error(f"JSONDecodeError: {json_error}")
+                    break
                 except HTTPError as http_error:
                     if http_error.response.status_code == 429:
                         _sleeping_loading_bar(
@@ -258,45 +238,36 @@ class ClassyFire:
                             "Too many requests, sleeping for 1 minute",
                             self._verbose,
                         )
-                    failed_smiles.extend(batch)
+                        continue
+                    failed_smiles.add(smiles_candidate)
+                    logging.error(f"HTTPError: {http_error}")
+                    break
+                except (
+                    requests.exceptions.ProxyError,
+                    requests.exceptions.ConnectTimeout,
+                    requests.exceptions.ReadTimeout,
+                    requests.exceptions.ChunkedEncodingError,
+                ):
+                    number_of_dead_proxies += 1
+                    self._dead_proxies.append(next_proxy)
+                    compress_json.dump(self._dead_proxies, "dead_proxies.json")
+                    self._proxies.remove(next_proxy)
+                    self._last_request_times.pop(next_proxy)
+                    logging.error(f"ProxyError: {next_proxy}")
+                    continue
                 except (
                     EmptySMILESClassification,
                     ClassyFireAPIRequestError,
                 ) as empty_smiles_error:
-                    warnings.warn(str(empty_smiles_error))
-                    failed_smiles.extend(batch)
+                    failed_smiles.add(smiles_candidate)
+                    logging.error(str(empty_smiles_error))
+                    break
                 except (
                     MultipleRadicalsOrAttachmentPointsNotSupported
                 ) as multiple_radicals_error:
-                    warnings.warn(str(multiple_radicals_error))
-                batch = []
-
-        if len(batch) > 0:
-            yield from self._classify_smiles(batch)
-
-        for smile in tqdm(
-            failed_smiles,
-            desc="Retrying failed SMILES",
-            unit="SMILES",
-            leave=False,
-            dynamic_ncols=True,
-            disable=not self._verbose,
-        ):
-            try:
-                yield from self._classify_smiles([smile])
-            except HTTPError as http_error:
-                if http_error.response.status_code == 429:
-                    _sleeping_loading_bar(
-                        60,
-                        "Too many requests, sleeping for 1 minute",
-                        self._verbose,
-                    )
-            except (
-                EmptySMILESClassification,
-                MultipleRadicalsOrAttachmentPointsNotSupported,
-                ClassyFireAPIRequestError,
-            ):
-                pass
+                    multiple_radicals.add(smiles_candidate)
+                    logging.error(str(multiple_radicals_error))
+                    break
 
     @typechecked
     def classify_spectra(

@@ -83,9 +83,7 @@ def main() -> None:
     """Main function."""
     parser = build_parser()
     args = parser.parse_args()
-    classyfire = ClassyFire(
-        email=args.email, timeout=args.timeout, sleep=args.sleep, verbose=args.verbose
-    )
+    classyfire = ClassyFire()
 
     if is_valid_smiles(args.inchikey_or_smiles_or_path):
         compound = list(classyfire.classify_smiles(args.inchikey_or_smiles_or_path))[0]
