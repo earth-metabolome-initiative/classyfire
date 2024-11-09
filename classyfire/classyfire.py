@@ -4,6 +4,7 @@ from typing import Dict, Iterable, List, Optional, Union, Set
 import warnings
 import time
 import os
+from multiprocessing import Pool
 import logging
 import requests
 from requests.exceptions import HTTPError
@@ -53,6 +54,25 @@ def _sleeping_loading_bar(sleep_time: int, reason: str, verbose: bool):
         time.sleep(0.1)
 
 
+def _validate_proxy(proxy: str) -> bool:
+    """Check if a proxy is valid."""
+    try:
+        requests.get(
+            "https://httpbin.org/ip",
+            proxies={"http": f"http://{proxy}", "https": f"https://{proxy}"},
+            timeout=10,
+        )
+        return True
+    except (
+        requests.exceptions.ProxyError,
+        requests.exceptions.ConnectTimeout,
+        requests.exceptions.ConnectionError,
+        requests.exceptions.ReadTimeout,
+        requests.exceptions.InvalidProxyURL,
+        requests.exceptions.ChunkedEncodingError,
+    ):
+        return False
+
 class ClassyFire:
     """ClassyFire API client."""
 
@@ -68,7 +88,7 @@ class ClassyFire:
         timeout: int = 10,
         sleep: int = 5,
         directory: str = "classyfire_cache",
-        verbose: bool = False,
+        verbose: bool = True,
     ):
         """ClassyFire API client."""
         self._timeout = timeout
@@ -84,6 +104,7 @@ class ClassyFire:
         )
         for dead_proxy in self._dead_proxies:
             self._proxies.remove(dead_proxy)
+
         self._classyfire_cache = directory
         self._verbose = verbose
         logging.basicConfig(
@@ -91,7 +112,32 @@ class ClassyFire:
             format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
             filename="classyfire.log",
         )
+        self.validate_proxies()
         self._last_request_times: Dict[str, int] = {proxy: 0 for proxy in self._proxies}
+
+    @typechecked
+    def validate_proxies(self):
+        """Filter proxies by their ability to connect to a reference URL."""
+        with Pool() as pool:
+            statuses = [
+                status
+                for status in tqdm(
+                    pool.imap(_validate_proxy, self._proxies),
+                    total=len(self._proxies),
+                    desc="Validating Proxies",
+                    unit="proxy",
+                    leave=False,
+                    dynamic_ncols=True,
+                    disable=not self._verbose,
+                )
+            ]
+
+            for proxy, status in zip(self._proxies, statuses):
+                if not status:
+                    self._dead_proxies.append(proxy)
+                    self._proxies.remove(proxy)
+            
+            compress_json.dump(self._dead_proxies, "dead_proxies.json")
 
     @typechecked
     def _is_classified(self, inchikey: str) -> bool:
@@ -257,6 +303,7 @@ class ClassyFire:
                     requests.exceptions.ConnectTimeout,
                     requests.exceptions.ConnectionError,
                     requests.exceptions.ReadTimeout,
+                    requests.exceptions.InvalidProxyURL,
                     requests.exceptions.ChunkedEncodingError,
                 ):
                     number_of_dead_proxies += 1
