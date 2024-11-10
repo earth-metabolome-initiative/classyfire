@@ -185,8 +185,14 @@ class ClassyFire:
                     f"Multiple radicals or attachment points are not supported for {inchikey}"
                 )
 
-            assert "smiles" in classification_response_json
-            assert "inchikey" in classification_response_json
+            if "smiles" not in classification_response_json:
+                raise EmptySMILESClassification(
+                    f"Empty SMILES classification for {inchikey}"
+                )
+            if "inchikey" not in classification_response_json:
+                raise EmptySMILESClassification(
+                    f"Empty InChIKey classification for {inchikey}"
+                )
 
             compress_json.dump(
                 classification_response_json,
