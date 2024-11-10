@@ -3,7 +3,6 @@
 from typing import Iterable, Optional, Union, Set
 import time
 import os
-import logging
 import requests
 from requests.exceptions import HTTPError
 from typeguard import typechecked
@@ -71,11 +70,6 @@ class ClassyFire:
         self._classyfire_cache = directory
         self._verbose = verbose
         self._last_request_time = 0
-        logging.basicConfig(
-            level=logging.INFO if verbose else logging.ERROR,
-            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-            filename="classyfire.log",
-        )
 
     @typechecked
     def _is_classified(self, inchikey: str) -> bool:
@@ -90,6 +84,7 @@ class ClassyFire:
             time_to_sleep = max(
                 0, self._sleep - (time.time() - self._last_request_time)
             )
+            self._last_request_time = time.time()
             _sleeping_loading_bar(
                 int(time_to_sleep), "Sleeping before request", self._verbose
             )
@@ -101,6 +96,7 @@ class ClassyFire:
                     "Content-Type": "application/json",
                 },
             )
+            self._last_request_time = time.time()
             classification_response.raise_for_status()
             classification_response_json = classification_response.json()
 
