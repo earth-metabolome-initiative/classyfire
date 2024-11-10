@@ -1,10 +1,8 @@
 """Submodule providing the ClassyFire class."""
 
-from typing import Dict, Iterable, List, Optional, Union, Set
-import warnings
+from typing import Iterable, Optional, Union, Set
 import time
 import os
-from multiprocessing import Pool
 import logging
 import requests
 from requests.exceptions import HTTPError
@@ -17,23 +15,19 @@ from matchms.importing import (
     load_from_mzxml,
 )
 from matchms import Spectrum
-from tqdm.auto import tqdm, trange
+from tqdm.auto import trange
 import pandas as pd
-from dict_hash import sha256
 from rich.console import Console
 from rich.table import Table
 from humanize import naturaldelta
 from classyfire.exceptions import (
     ClassyFireAPIRequestError,
-    InvalidSMILES,
     EmptySMILESClassification,
     MultipleRadicalsOrAttachmentPointsNotSupported,
 )
 from classyfire.utils import (
-    is_valid_inchikey,
     is_valid_smiles,
     convert_smiles_to_inchikey,
-    convert_smiles_to_inchikeys,
 )
 from classyfire.__version__ import __version__
 from classyfire.classification import Compound
@@ -53,26 +47,6 @@ def _sleeping_loading_bar(sleep_time: int, reason: str, verbose: bool):
     ):
         time.sleep(0.1)
 
-
-def _validate_proxy(proxy: str) -> bool:
-    """Check if a proxy is valid."""
-    try:
-        requests.get(
-            "https://httpbin.org/ip",
-            proxies={"http": f"http://{proxy}", "https": f"https://{proxy}"},
-            timeout=10,
-        )
-        return True
-    except (
-        requests.exceptions.ProxyError,
-        requests.exceptions.ConnectTimeout,
-        requests.exceptions.ConnectionError,
-        requests.exceptions.ReadTimeout,
-        requests.exceptions.InvalidProxyURL,
-        requests.exceptions.ChunkedEncodingError,
-        requests.exceptions.TooManyRedirects
-    ):
-        return False
 
 class ClassyFire:
     """ClassyFire API client."""
@@ -94,52 +68,14 @@ class ClassyFire:
         """ClassyFire API client."""
         self._timeout = timeout
         self._sleep = sleep
-        self._proxies = requests.get(
-            "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt",
-            timeout=10,
-        ).text.split("\n")
-        self._dead_proxies = (
-            compress_json.load("dead_proxies.json")
-            if os.path.exists("dead_proxies.json")
-            else []
-        )
-        for dead_proxy in self._dead_proxies:
-            if dead_proxy in self._proxies:
-                self._proxies.remove(dead_proxy)
-
         self._classyfire_cache = directory
         self._verbose = verbose
+        self._last_request_time = 0
         logging.basicConfig(
             level=logging.INFO if verbose else logging.ERROR,
             format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
             filename="classyfire.log",
         )
-        self.validate_proxies()
-        self._last_request_times: Dict[str, int] = {proxy: 0 for proxy in self._proxies}
-
-    @typechecked
-    def validate_proxies(self):
-        """Filter proxies by their ability to connect to a reference URL."""
-        with Pool() as pool:
-            statuses = [
-                status
-                for status in tqdm(
-                    pool.imap(_validate_proxy, self._proxies),
-                    total=len(self._proxies),
-                    desc="Validating Proxies",
-                    unit="proxy",
-                    leave=False,
-                    dynamic_ncols=True,
-                    disable=not self._verbose,
-                )
-            ]
-
-            for proxy, status in zip(self._proxies, statuses):
-                if not status:
-                    self._dead_proxies.append(proxy)
-                    self._proxies.remove(proxy)
-            
-            compress_json.dump(self._dead_proxies, "dead_proxies.json")
 
     @typechecked
     def _is_classified(self, inchikey: str) -> bool:
@@ -147,19 +83,16 @@ class ClassyFire:
         return os.path.exists(os.path.join(self._classyfire_cache, f"{inchikey}.json"))
 
     @typechecked
-    def _classify_inchikey(
-        self, inchikey: str, proxy: Optional[str] = None
-    ) -> Compound:
+    def _classify_inchikey(self, inchikey: str) -> Compound:
         """Get the classification of a chemical entity."""
 
         if not os.path.exists(os.path.join(self._classyfire_cache, f"{inchikey}.json")):
             time_to_sleep = max(
-                0, self._sleep - (time.time() - self._last_request_times.get(proxy, 0))
+                0, self._sleep - (time.time() - self._last_request_time)
             )
             _sleeping_loading_bar(
                 int(time_to_sleep), "Sleeping before request", self._verbose
             )
-            self._last_request_times[proxy] = int(time.time())
             classification_response = requests.get(
                 self.INCHIKEY_URL_PATTERN.format(inchikey=inchikey),
                 timeout=self._timeout,
@@ -167,13 +100,7 @@ class ClassyFire:
                     "Accept": "application/json",
                     "Content-Type": "application/json",
                 },
-                proxies=(
-                    {"http": f"http://{proxy}", "https": f"https://{proxy}"}
-                    if proxy
-                    else None
-                ),
             )
-            self._last_request_times[proxy] = int(time.time())
             classification_response.raise_for_status()
             classification_response_json = classification_response.json()
 
@@ -221,45 +148,45 @@ class ClassyFire:
 
         if isinstance(smiles, str):
             smiles = [smiles]
+            total = 1
 
         failed_smiles: Set[str] = set()
         invalid_smiles: Set[str] = set()
         multiple_radicals: Set[str] = set()
         classified_smiles: Set[str] = set()
-        number_of_dead_proxies = 0
 
         started = time.time()
 
         console = Console()
         last_print = 0
 
-
         for smiles_candidate in smiles:
             while True:
                 if time.time() - last_print > 1:
                     table = Table(title="ClassyFire Progress")
                     table.add_column("Time Elapsed", justify="right")
+                    table.add_column("Remaining Time", justify="right")
                     table.add_column("Invalid SMILES", justify="right")
                     table.add_column("Failed SMILES", justify="right")
                     table.add_column("Multiple Radicals", justify="right")
                     table.add_column("Classified SMILES", justify="right")
-                    if self._proxies:
-                        table.add_column("Dead Proxies", justify="right")
-                        table.add_column("Total Proxies", justify="right")
+                    processed_smiles = (
+                        len(invalid_smiles)
+                        + len(failed_smiles)
+                        + len(multiple_radicals)
+                        + len(classified_smiles)
+                    )
                     table.add_row(
                         naturaldelta(time.time() - started),
+                        naturaldelta(
+                            (time.time() - started)
+                            * (total - processed_smiles)
+                            / (processed_smiles + 1)
+                        ),
                         f"{len(invalid_smiles)}",
                         f"{len(failed_smiles)}",
                         f"{len(multiple_radicals)}",
                         f"{len(classified_smiles)}",
-                        *(
-                            (
-                                f"{number_of_dead_proxies}",
-                                f"{len(self._proxies)}",
-                            )
-                            if self._proxies
-                            else ()
-                        ),
                     )
                     console.clear()
                     console.print(table)
@@ -267,33 +194,26 @@ class ClassyFire:
 
                 if not is_valid_smiles(smiles_candidate):
                     invalid_smiles.add(smiles_candidate)
-                    logging.error(f"Invalid SMILES: {smiles_candidate}")
                     break
 
                 if smiles_candidate in classified_smiles:
                     break
-                
+
                 if smiles_candidate in failed_smiles:
                     break
 
                 if smiles_candidate in multiple_radicals:
                     break
 
-                next_proxy = min(
-                    self._last_request_times,
-                    key=self._last_request_times.get,
-                )
                 try:
                     classification = self._classify_inchikey(
                         inchikey=convert_smiles_to_inchikey(smiles_candidate),
-                        proxy=next_proxy,
                     )
                     classified_smiles.add(smiles_candidate)
                     yield classification
                     break
-                except requests.exceptions.JSONDecodeError as json_error:
+                except requests.exceptions.JSONDecodeError:
                     failed_smiles.add(smiles_candidate)
-                    logging.error(f"JSONDecodeError: {json_error}")
                     break
                 except HTTPError as http_error:
                     if http_error.response.status_code == 429:
@@ -304,36 +224,15 @@ class ClassyFire:
                         )
                         continue
                     failed_smiles.add(smiles_candidate)
-                    logging.error(f"HTTPError: {http_error}")
                     break
-                except (
-                    requests.exceptions.ProxyError,
-                    requests.exceptions.ConnectTimeout,
-                    requests.exceptions.ConnectionError,
-                    requests.exceptions.ReadTimeout,
-                    requests.exceptions.TooManyRedirects,
-                    requests.exceptions.InvalidProxyURL,
-                    requests.exceptions.ChunkedEncodingError,
-                ):
-                    number_of_dead_proxies += 1
-                    self._dead_proxies.append(next_proxy)
-                    compress_json.dump(self._dead_proxies, "dead_proxies.json")
-                    self._proxies.remove(next_proxy)
-                    self._last_request_times.pop(next_proxy)
-                    logging.error(f"ProxyError: {next_proxy}")
-                    continue
                 except (
                     EmptySMILESClassification,
                     ClassyFireAPIRequestError,
-                ) as empty_smiles_error:
+                ):
                     failed_smiles.add(smiles_candidate)
-                    logging.error(str(empty_smiles_error))
                     break
-                except (
-                    MultipleRadicalsOrAttachmentPointsNotSupported
-                ) as multiple_radicals_error:
+                except MultipleRadicalsOrAttachmentPointsNotSupported:
                     multiple_radicals.add(smiles_candidate)
-                    logging.error(str(multiple_radicals_error))
                     break
 
     @typechecked
