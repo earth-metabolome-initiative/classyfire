@@ -208,6 +208,13 @@ class ClassyFire:
                     classified_smiles.add(smiles_candidate)
                     yield classification
                     break
+                except requests.exceptions.ReadTimeout:
+                    _sleeping_loading_bar(
+                        60,
+                        "Request timeout, sleeping for 1 minute",
+                        self._verbose,
+                    )
+                    continue
                 except requests.exceptions.JSONDecodeError:
                     failed_smiles.add(smiles_candidate)
                     break
