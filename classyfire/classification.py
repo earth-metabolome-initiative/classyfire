@@ -56,7 +56,7 @@ class Compound:
     smiles: str
     inchikey: str
     kingdom: ChemontNode
-    superclass: ChemontNode
+    superclass: Optional[ChemontNode]
     klass: Optional[ChemontNode]
     subclass: Optional[ChemontNode]
     intermediate_nodes: List[ChemontNode]
@@ -84,7 +84,7 @@ class Compound:
             smiles=data["smiles"],
             inchikey=data["inchikey"],
             kingdom=ChemontNode(**data["kingdom"]),
-            superclass=ChemontNode(**data["superclass"]),
+            superclass=ChemontNode(**data["superclass"]) if data["superclass"] else None,
             klass=ChemontNode(**data["class"]) if data["class"] is not None else None,
             subclass=(
                 ChemontNode(**data["subclass"])
