@@ -157,11 +157,13 @@ fn run_reporter(
     Ok(())
 }
 
+#[inline]
 fn is_throttled_or_html(error_text: &str) -> bool {
     let lower = error_text.to_ascii_lowercase();
     lower.contains("throttled") || lower.contains("returned html")
 }
 
+#[inline]
 fn classify_backoff_reason(error_text: &str) -> &'static str {
     let lower = error_text.to_ascii_lowercase();
     if lower.contains("throttled") {
@@ -252,6 +254,7 @@ fn sleep_until_stop(running: &Arc<AtomicBool>, seconds: u64) -> bool {
     running.load(Ordering::SeqCst)
 }
 
+#[inline]
 fn now_ts() -> i64 {
     chrono::Utc::now().timestamp()
 }

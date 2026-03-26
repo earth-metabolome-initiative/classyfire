@@ -229,16 +229,24 @@ pub fn save_import_state(
 }
 
 pub fn select_next_molecule(conn: &mut SqliteConnection) -> Result<Option<Molecule>> {
-    Ok(molecules::table
-        .filter(
-            molecules::state
-                .eq(STATE_NEW)
-                .or(molecules::state.eq(STATE_ERROR)),
-        )
+    let next_new = molecules::table
+        .filter(molecules::state.eq(STATE_NEW))
         .order((
-            diesel::dsl::sql::<diesel::sql_types::Integer>(
-                "CASE WHEN state = 'new' THEN 0 ELSE 1 END",
-            ),
+            molecules::updated_at.asc(),
+            molecules::attempts.asc(),
+            molecules::inchikey.asc(),
+        ))
+        .select(Molecule::as_select())
+        .first::<Molecule>(conn)
+        .optional()?;
+
+    if next_new.is_some() {
+        return Ok(next_new);
+    }
+
+    Ok(molecules::table
+        .filter(molecules::state.eq(STATE_ERROR))
+        .order((
             molecules::updated_at.asc(),
             molecules::attempts.asc(),
             molecules::inchikey.asc(),
@@ -524,6 +532,7 @@ pub fn export_labels(conn: &mut SqliteConnection, output: &Path) -> Result<u64> 
     Ok(exported)
 }
 
+#[inline]
 fn state_count(states: &[StateCount], target: &str) -> i64 {
     states
         .iter()

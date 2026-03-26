@@ -46,6 +46,7 @@ pub struct EntityResponse {
 }
 
 impl EntityResponse {
+    #[inline]
     pub fn has_classification(&self) -> bool {
         self.direct_parent.is_some()
             || self.kingdom.is_some()
