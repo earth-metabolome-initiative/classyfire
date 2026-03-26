@@ -1,6 +1,7 @@
 # ClassyFire GET Downloader
 
 [![CI](https://github.com/LucaCappelletti94/classyfire/actions/workflows/ci.yml/badge.svg)](https://github.com/LucaCappelletti94/classyfire/actions/workflows/ci.yml)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19235916.svg)](https://doi.org/10.5281/zenodo.19235916)
 [![license](https://img.shields.io/github/license/LucaCappelletti94/classyfire)](LICENSE)
 
 Rust downloader for importing PubChem `CID-InChI-Key` data into SQLite and crawling ClassyFire only through `GET /entities/{InChIKey}.json`.
