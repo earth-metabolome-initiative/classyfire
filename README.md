@@ -1,6 +1,11 @@
 # ClassyFire GET Downloader
 
+[![CI](https://github.com/LucaCappelletti94/classyfire/actions/workflows/ci.yml/badge.svg)](https://github.com/LucaCappelletti94/classyfire/actions/workflows/ci.yml)
+[![license](https://img.shields.io/github/license/LucaCappelletti94/classyfire)](LICENSE)
+
 Rust downloader for importing PubChem `CID-InChI-Key` data into SQLite and crawling ClassyFire only through `GET /entities/{InChIKey}.json`.
+
+We do not recommend running this tool yourself. We are already running it and publishing weekly Parquet snapshots to Zenodo. Once the public Zenodo record URL is in place, you should download the published dataset from there instead of placing additional load on the upstream ClassyFire service. The code is shared for transparency, reproducibility, and long-term stewardship of the recovered labels.
 
 This project exists to build a local, durable copy of ClassyFire labels for PubChem compounds. The goal is to recover as many stable ClassyFire classifications as possible into a dataset that can later be exported, audited, used to train or validate a local replacement, and periodically published as archival Zenodo releases.
 
