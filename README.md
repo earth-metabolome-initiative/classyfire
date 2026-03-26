@@ -96,6 +96,17 @@ Start by copying the checked-in example:
 cp .env.example .env
 ```
 
+## Resource Estimates
+
+These are rough estimates for the current streaming design, not hard benchmarks. They exclude the PubChem input file itself, which can be stored separately.
+
+- CPU: the crawler is latency-bound, not CPU-bound. At the default `5s` GET cadence it issues only `12` requests per minute, so one small `vCPU` is enough. Average CPU usage should usually stay in the low single-digit percent range of one core, with short spikes for TLS, JSON parsing, and `zstd` compression.
+- RAM: the main fixed state is the four `mmap`ed bitmap files. At `130,000,000` rows they total about `62 MiB`. Add about `8 MiB` for the plain-text input buffer, small HTTP/JSON buffers, the current `zstd` writer, and normal Rust process overhead. A headless run should fit comfortably in about `256 MiB`, and `512 MiB` is a conservative VM target. `4 GiB` of RAM is far more than this design should need.
+- Disk, fixed part: `checkpoint.json` is tiny, and the four bitmap files top out at about `62 MiB` for the full `130M`-row PubChem input. After one year at the nominal `12` requests per minute, the bitmap files would only be about `3.5 MiB`; at the currently observed live rate of about `3.1` requests per minute they would be about `1 MiB`.
+- Disk, growing part: success shards dominate long-run storage. Based on the current sample in `docs/streaming-redesign.md`, `JSONL.zst` success output is about `535` compressed bytes per successful row.
+- One-year disk growth at the default `5s` cadence: about `3.1 GiB/year` in the worst case where every request becomes a stored success record, or about `1.6 GiB/year` if the current sample success ratio of roughly `52%` holds.
+- One-year disk growth at the currently observed live rate (`3.1` requests per minute): about `0.8 GiB/year` worst-case, or about `0.4 GiB/year` at the same sample success ratio.
+
 ## Terminal States
 
 Each input row ends in exactly one terminal state:
