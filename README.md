@@ -23,6 +23,7 @@ The code deliberately sticks to the `GET /entities/{InChIKey}.json` path because
 - tracks terminal row states in `mmap`ed bitmap files
 - resumes from a small checkpoint file
 - prints a per-run ntfy subscription URL with a UUID topic
+- sends an ntfy startup message that includes the subscription URL and current counts
 - publishes a daily ntfy status update at `18:00 UTC`
 - publishes a merged Zenodo snapshot periodically from sealed success shards
 - sends an ntfy message after each Zenodo publish attempt
@@ -72,10 +73,16 @@ The output directory will contain:
     ...
 ```
 
-On startup, the runner prints an ntfy URL such as `https://ntfy.sh/<uuid-v4-topic>`.
-That topic receives one daily status message at `18:00 UTC` with the current `completed` and `failed` counts.
+On startup, the runner prints an ntfy URL such as `https://ntfy.sh/<uuid-v4-topic>` and sends a startup message to that topic with:
 
-The `run` command also requires Zenodo credentials at startup. It builds a merged `classyfire-labels.jsonl.zst` snapshot from the sealed success shards every `CLASSYFIRE_ZENODO_PUBLISH_INTERVAL_SECONDS` seconds, uploads that snapshot plus a `manifest.json` as a new Zenodo version, and posts the result to the same ntfy topic.
+- the subscription URL
+- the input path
+- the output directory
+- the current `completed` and `failed` counts
+
+That same topic then receives one daily status message at `18:00 UTC` with the current `completed` and `failed` counts.
+
+The `run` command also requires Zenodo credentials at startup. It builds a merged `classyfire-labels.jsonl.zst` snapshot from the sealed success shards every `CLASSYFIRE_ZENODO_PUBLISH_INTERVAL_SECONDS` seconds from process start, uploads that snapshot plus a `manifest.json` as a new Zenodo version, and posts the result to the same ntfy topic.
 
 Required environment variables:
 

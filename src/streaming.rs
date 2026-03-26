@@ -12,7 +12,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, sleep};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 use uuid::Uuid;
@@ -27,6 +27,15 @@ const RELEASE_DATASET_FILENAME: &str = "classyfire-labels.jsonl.zst";
 const RELEASE_DIR_NAME: &str = "releases";
 const RELEASE_MANIFEST_FILENAME: &str = "manifest.json";
 const SUCCESS_DIR_NAME: &str = "success";
+
+static CTRLC_HANDLER_INSTALLED: OnceLock<()> = OnceLock::new();
+static CTRLC_TARGET: OnceLock<Mutex<Option<CtrlcTarget>>> = OnceLock::new();
+
+#[derive(Clone)]
+struct CtrlcTarget {
+    running: Arc<AtomicBool>,
+    ui: Arc<Ui>,
+}
 
 pub fn run_streaming(config: StreamConfig) -> Result<()> {
     config.validate()?;
@@ -55,17 +64,19 @@ pub fn run_streaming(config: StreamConfig) -> Result<()> {
     ui.set_ntfy_url(&ntfy_url);
 
     eprintln!("ntfy status URL: {ntfy_url}");
-
-    {
-        let running = Arc::clone(&running);
-        let ui = Arc::clone(&ui);
-        ctrlc::set_handler(move || {
-            if running.swap(false, Ordering::SeqCst) {
-                ui.info("stopping streaming runner");
-            }
-        })
-        .context("failed to install ctrl-c handler")?;
+    let startup_snapshot = counters.snapshot();
+    if let Err(error) = ntfy_client.publish_started(
+        &ntfy_url,
+        &config.input,
+        &config.output_dir,
+        startup_snapshot,
+    ) {
+        ui.info(format!("ntfy startup notification failed: {error:#}"));
+    } else {
+        ui.info("published ntfy startup notification");
     }
+
+    install_or_update_ctrlc_handler(Arc::clone(&running), Arc::clone(&ui))?;
 
     let worker_handle = {
         let running = Arc::clone(&running);
@@ -350,6 +361,28 @@ fn run_stream_reporter(
             break;
         }
     }
+    Ok(())
+}
+
+fn install_or_update_ctrlc_handler(running: Arc<AtomicBool>, ui: Arc<Ui>) -> Result<()> {
+    let target = CTRLC_TARGET.get_or_init(|| Mutex::new(None));
+    *target.lock().expect("ctrl-c target mutex poisoned") = Some(CtrlcTarget { running, ui });
+
+    if CTRLC_HANDLER_INSTALLED.get().is_none() {
+        ctrlc::set_handler(move || {
+            if let Some(target) = CTRLC_TARGET
+                .get()
+                .and_then(|state| state.lock().ok().and_then(|guard| guard.clone()))
+            {
+                if target.running.swap(false, Ordering::SeqCst) {
+                    target.ui.info("stopping streaming runner");
+                }
+            }
+        })
+        .context("failed to install ctrl-c handler")?;
+        let _ = CTRLC_HANDLER_INSTALLED.set(());
+    }
+
     Ok(())
 }
 
@@ -1160,6 +1193,30 @@ impl NtfyClient {
         format!("{}/{}", self.base_url, self.topic)
     }
 
+    fn publish_started(
+        &self,
+        subscription_url: &str,
+        input_path: &Path,
+        output_dir: &Path,
+        snapshot: ProgressSnapshot,
+    ) -> Result<()> {
+        self.publish_message(
+            "ClassyFire crawler started",
+            &format!(
+                "subscription_url: {}\ninput: {}\noutput_dir: {}\ncompleted: {}\nfailed: {}\nsuccess: {}\nmiss: {}\ninvalid_input: {}",
+                subscription_url.trim(),
+                input_path.display(),
+                output_dir.display(),
+                snapshot.completed(),
+                snapshot.failed,
+                snapshot.success,
+                snapshot.miss,
+                snapshot.invalid
+            ),
+            "failed POST ntfy startup notification",
+        )
+    }
+
     fn publish_daily_status(&self, snapshot: ProgressSnapshot) -> Result<()> {
         self.publish_message(
             &format!("ClassyFire daily status {}", Utc::now().format("%Y-%m-%d")),
@@ -1947,6 +2004,45 @@ mod tests {
     }
 
     #[test]
+    fn ntfy_client_publishes_startup_notification_with_subscription_url() {
+        let server = MockServer::new([("/topic-123", MockResponse::text(200, "ok"))]);
+        let client = NtfyClient::new(
+            &server.url(),
+            "topic-123".to_owned(),
+            "classyfire-test/0.1",
+            1,
+        )
+        .unwrap();
+
+        client
+            .publish_started(
+                &client.subscription_url(),
+                Path::new("./input.tsv"),
+                Path::new("./run"),
+                ProgressSnapshot {
+                    success: 10,
+                    miss: 5,
+                    invalid: 2,
+                    failed: 3,
+                },
+            )
+            .unwrap();
+
+        let requests = server.seen_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/topic-123");
+        assert_eq!(
+            requests[0].headers.get("title").map(String::as_str),
+            Some("ClassyFire crawler started")
+        );
+        assert!(requests[0]
+            .body
+            .contains(&format!("subscription_url: {}", client.subscription_url())));
+        assert!(requests[0].body.contains("completed: 17"));
+        assert!(requests[0].body.contains("failed: 3"));
+    }
+
+    #[test]
     fn ntfy_client_publishes_zenodo_release_completion() {
         let server = MockServer::new([("/topic-123", MockResponse::text(200, "ok"))]);
         let client = NtfyClient::new(
@@ -2008,5 +2104,41 @@ mod tests {
         assert!(requests[0]
             .body
             .contains("record_url: https://zenodo.org/records/999"));
+    }
+
+    #[test]
+    fn run_streaming_sends_startup_ntfy_notification() {
+        let dir = tempdir().unwrap();
+        let input_path = dir.path().join("empty.tsv");
+        let output_dir = dir.path().join("run");
+        fs::write(&input_path, "").unwrap();
+
+        let server = MockServer::new([("/", MockResponse::text(404, "missing route"))]);
+        let config = test_config(
+            input_path.clone(),
+            output_dir.clone(),
+            "http://127.0.0.1:9".to_owned(),
+        );
+        let config = StreamConfig {
+            ntfy_base_url: server.url(),
+            ..config
+        };
+
+        run_streaming(config).unwrap();
+
+        let requests = server.seen_requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].headers.contains_key("title"));
+        assert_eq!(
+            requests[0].headers.get("title").map(String::as_str),
+            Some("ClassyFire crawler started")
+        );
+        assert!(requests[0].body.contains("subscription_url: http://"));
+        assert!(requests[0]
+            .body
+            .contains(&format!("input: {}", input_path.display())));
+        assert!(requests[0]
+            .body
+            .contains(&format!("output_dir: {}", output_dir.display())));
     }
 }
