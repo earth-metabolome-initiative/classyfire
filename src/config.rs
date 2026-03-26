@@ -11,6 +11,7 @@ pub const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
 pub const DEFAULT_GET_SLEEP_SECONDS: u64 = 5;
 pub const DEFAULT_THROTTLE_BACKOFF_SECONDS: u64 = 300;
 pub const DEFAULT_STATUS_INTERVAL_SECONDS: u64 = 1;
+pub const DEFAULT_ZENODO_PUBLISH_INTERVAL_SECONDS: u64 = 7 * 24 * 60 * 60;
 
 #[derive(Debug, Parser)]
 #[command(name = "classyfire-crawler")]
@@ -26,6 +27,8 @@ pub enum Commands {
     RunGet(DbArgs),
     Stats(DbArgs),
     ExportLabels(ExportLabelsArgs),
+    ExportParquet(ExportParquetArgs),
+    PublishZenodo(DbArgs),
     RebuildCounters(DbArgs),
 }
 
@@ -51,6 +54,14 @@ pub struct ExportLabelsArgs {
     pub output: PathBuf,
 }
 
+#[derive(Debug, Args, Clone)]
+pub struct ExportParquetArgs {
+    #[command(flatten)]
+    pub db_args: DbArgs,
+    #[arg(long)]
+    pub output: PathBuf,
+}
+
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
     pub db: PathBuf,
@@ -60,6 +71,9 @@ pub struct RuntimeConfig {
     pub get_sleep_seconds: u64,
     pub throttle_backoff_seconds: u64,
     pub status_interval_seconds: u64,
+    pub zenodo_token: Option<String>,
+    pub zenodo_deposit_id: Option<String>,
+    pub zenodo_publish_interval_seconds: u64,
 }
 
 impl RuntimeConfig {
@@ -78,6 +92,13 @@ impl RuntimeConfig {
                 "CLASSYFIRE_STATUS_INTERVAL_SECONDS",
                 DEFAULT_STATUS_INTERVAL_SECONDS,
             ),
+            zenodo_token: env_string_opt("ZENODO_TOKEN"),
+            zenodo_deposit_id: env_string_opt("CLASSYFIRE_ZENODO_DEPOSIT_ID")
+                .or_else(|| env_string_opt("ZENODO_DEPOSIT_ID")),
+            zenodo_publish_interval_seconds: env_u64(
+                "CLASSYFIRE_ZENODO_PUBLISH_INTERVAL_SECONDS",
+                DEFAULT_ZENODO_PUBLISH_INTERVAL_SECONDS,
+            ),
         }
     }
 
@@ -88,12 +109,39 @@ impl RuntimeConfig {
         if self.status_interval_seconds == 0 {
             bail!("CLASSYFIRE_STATUS_INTERVAL_SECONDS must be greater than zero");
         }
+        if self.zenodo_token.is_some() ^ self.zenodo_deposit_id.is_some() {
+            bail!(
+                "ZENODO_TOKEN and CLASSYFIRE_ZENODO_DEPOSIT_ID must both be set to enable publishing"
+            );
+        }
+        if self.zenodo_token.is_some() && self.zenodo_publish_interval_seconds == 0 {
+            bail!("CLASSYFIRE_ZENODO_PUBLISH_INTERVAL_SECONDS must be greater than zero");
+        }
         Ok(())
     }
+
+    pub fn zenodo_config(&self) -> Option<ZenodoConfig> {
+        Some(ZenodoConfig {
+            token: self.zenodo_token.clone()?,
+            deposit_id: self.zenodo_deposit_id.clone()?,
+            publish_interval_seconds: self.zenodo_publish_interval_seconds,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ZenodoConfig {
+    pub token: String,
+    pub deposit_id: String,
+    pub publish_interval_seconds: u64,
 }
 
 fn env_string(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_owned())
+}
+
+fn env_string_opt(key: &str) -> Option<String> {
+    env::var(key).ok().filter(|value| !value.is_empty())
 }
 
 fn env_u64(key: &str, default: u64) -> u64 {

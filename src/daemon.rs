@@ -1,10 +1,13 @@
 use crate::api::{validate_entity_body, ApiClient};
-use crate::config::RuntimeConfig;
+use crate::config::{RuntimeConfig, ZenodoConfig};
 use crate::db::{
-    collect_runner_snapshot, establish_pool, mark_molecule_done, mark_molecule_error,
-    mark_molecule_miss, recreate_runtime_indexes, run_migrations, select_next_molecule,
+    collect_runner_snapshot, collect_stats, establish_pool, mark_molecule_done,
+    mark_molecule_error, mark_molecule_miss, recreate_runtime_indexes, run_migrations,
+    select_next_molecule,
 };
+use crate::export::export_parquet;
 use crate::ui::Ui;
+use crate::zenodo;
 use anyhow::{Context, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -48,8 +51,23 @@ pub fn run_daemon(config: RuntimeConfig) -> Result<()> {
         let running = Arc::clone(&running);
         let get_limiter = Arc::clone(&get_limiter);
         let ui = Arc::clone(&ui);
+        let config = config.clone();
+        let pool = pool.clone();
         thread::spawn(move || run_reporter(running, get_limiter, ui, config, pool))
     };
+
+    let publisher_handle = config.zenodo_config().map(|zenodo_config| {
+        let running = Arc::clone(&running);
+        let ui = Arc::clone(&ui);
+        let pool = pool.clone();
+        thread::spawn(move || run_zenodo_publisher(running, ui, pool, zenodo_config))
+    });
+
+    if config.zenodo_config().is_some() {
+        ui.info("zenodo publisher enabled");
+    } else {
+        ui.info("zenodo publisher disabled");
+    }
 
     worker_handle
         .join()
@@ -57,6 +75,11 @@ pub fn run_daemon(config: RuntimeConfig) -> Result<()> {
     reporter_handle
         .join()
         .map_err(|_| anyhow::anyhow!("status worker panicked"))??;
+    if let Some(handle) = publisher_handle {
+        handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("Zenodo publisher panicked"))??;
+    }
     Ok(())
 }
 
@@ -157,6 +180,38 @@ fn run_reporter(
     Ok(())
 }
 
+fn run_zenodo_publisher(
+    running: Arc<AtomicBool>,
+    ui: Arc<Ui>,
+    pool: crate::db::DbPool,
+    config: ZenodoConfig,
+) -> Result<()> {
+    let interval = Duration::from_secs(config.publish_interval_seconds.max(1));
+    let mut last_publish = Instant::now();
+
+    while running.load(Ordering::SeqCst) {
+        if last_publish.elapsed() < interval {
+            let remaining = interval
+                .saturating_sub(last_publish.elapsed())
+                .as_secs()
+                .min(60);
+            if !sleep_until_stop(&running, remaining.max(1)) {
+                break;
+            }
+            continue;
+        }
+
+        ui.info("zenodo publish started");
+        match publish_zenodo_snapshot(&pool, &config) {
+            Ok(doi) => ui.info(format!("zenodo published {doi}")),
+            Err(error) => ui.info(format!("zenodo publish failed: {error:#}")),
+        }
+        last_publish = Instant::now();
+    }
+
+    Ok(())
+}
+
 #[inline]
 fn is_throttled_or_html(error_text: &str) -> bool {
     let lower = error_text.to_ascii_lowercase();
@@ -173,6 +228,32 @@ fn classify_backoff_reason(error_text: &str) -> &'static str {
     } else {
         "error"
     }
+}
+
+fn publish_zenodo_snapshot(pool: &crate::db::DbPool, config: &ZenodoConfig) -> Result<String> {
+    let parquet_path = zenodo_parquet_path();
+    let stats = {
+        let mut conn = pool.get()?;
+        let stats = collect_stats(&mut conn)?;
+        if stats.done_count == 0 {
+            return Err(anyhow::anyhow!(
+                "no labeled rows available for Zenodo export"
+            ));
+        }
+        export_parquet(&mut conn, &parquet_path)?;
+        stats
+    };
+
+    let publish_result = zenodo::publish(&config.token, &config.deposit_id, &parquet_path, &stats);
+    let _ = std::fs::remove_file(&parquet_path);
+    publish_result
+}
+
+fn zenodo_parquet_path() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "classyfire-labels-{}.parquet",
+        chrono::Utc::now().format("%Y%m%dT%H%M%S")
+    ))
 }
 
 struct GetRateLimiter {

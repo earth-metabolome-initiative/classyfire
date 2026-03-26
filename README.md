@@ -18,7 +18,8 @@ This also means the full PubChem crawl is extremely slow. PubChem currently cont
 - stores raw successful ClassyFire JSON as compressed blobs
 - tracks `new`, `done`, `miss`, and `error` states
 - keeps durable aggregate counters for a small live TUI
-- exports recovered labels as JSONL
+- exports recovered labels as JSONL and Parquet
+- can publish weekly Parquet snapshots to Zenodo when configured
 
 `run-get` always prefers untouched `new` rows. Once there are no `new` rows left, rerunning the same command on the same DB naturally revisits `error` rows and skips everything already classified or permanently missed.
 
@@ -54,6 +55,21 @@ cargo run --release -- export-labels \
   --output /mnt/bfd/classyfire/labels.jsonl
 ```
 
+Export recovered labels as Parquet:
+
+```bash
+cargo run --release -- export-parquet \
+  --db /mnt/bfd/classyfire/classyfire.sqlite \
+  --output /mnt/bfd/classyfire/labels.parquet
+```
+
+Publish a Parquet snapshot to Zenodo immediately:
+
+```bash
+cargo run --release -- publish-zenodo \
+  --db /mnt/bfd/classyfire/classyfire.sqlite
+```
+
 Rebuild aggregate counters from stored raw JSON:
 
 ```bash
@@ -75,8 +91,22 @@ Runtime defaults are in `src/config.rs`:
 - GET cadence: `5s`
 - throttle backoff: `300s`
 - request timeout: `30s`
+- Zenodo publish interval: `604800s` (`7 days`)
 
-All operational defaults can be overridden with `CLASSYFIRE_*` environment variables.
+All operational defaults can be overridden with `CLASSYFIRE_*` environment variables. The binary loads them from `.env` automatically at startup.
+
+Start by copying the checked-in example:
+
+```bash
+cp .env.example .env
+```
+
+Weekly Zenodo publishing is disabled unless both of these are set:
+
+- `ZENODO_TOKEN`
+- `CLASSYFIRE_ZENODO_DEPOSIT_ID`
+
+When they are present, `run-get` starts a background publisher thread that exports a Parquet snapshot and publishes a new Zenodo version every week.
 
 ## Stored Data
 
