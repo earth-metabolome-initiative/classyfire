@@ -1,7 +1,7 @@
-use crate::types::EntityResponse;
 use anyhow::{bail, Context, Result};
 use reqwest::blocking::Client;
-use serde_json::Value;
+use serde::Deserialize;
+use serde::de::IgnoredAny;
 
 const HTML_MARKERS: [&str; 4] = ["<!doctype html", "<html", "<head", "unsupported browser"];
 
@@ -44,7 +44,7 @@ impl ApiClient {
     }
 }
 
-pub fn validate_entity_body(body: &HttpBody) -> Result<Option<EntityResponse>> {
+pub fn validate_entity_body(body: &HttpBody) -> Result<bool> {
     if body.status == 429 {
         bail!("entity request was throttled");
     }
@@ -55,28 +55,18 @@ pub fn validate_entity_body(body: &HttpBody) -> Result<Option<EntityResponse>> {
         );
     }
     if body.status == 404 || body_looks_not_found(&body.body) {
-        return Ok(None);
+        return Ok(false);
     }
     if body.status >= 400 {
         bail!("entity request failed with status {}", body.status);
     }
     if body.body.trim().is_empty() {
-        return Ok(None);
+        return Ok(false);
     }
 
-    let value: Value =
-        serde_json::from_str(&body.body).context("failed to parse entity response JSON")?;
-    if value.is_null() {
-        return Ok(None);
-    }
-
-    let entity: EntityResponse =
-        serde_json::from_value(value).context("failed to deserialize entity response")?;
-    if entity.has_classification() {
-        Ok(Some(entity))
-    } else {
-        Ok(None)
-    }
+    let probe: ClassificationProbe = serde_json::from_str(&body.body)
+        .context("failed to parse entity response JSON")?;
+    Ok(probe.has_classification())
 }
 
 fn http_body_from_response(response: reqwest::blocking::Response) -> Result<HttpBody> {
@@ -147,9 +137,31 @@ fn body_looks_not_found(body: &str) -> bool {
         .contains("the page you were looking for doesn't exist")
 }
 
+#[derive(Debug, Deserialize)]
+struct ClassificationProbe {
+    kingdom: Option<IgnoredAny>,
+    superclass: Option<IgnoredAny>,
+    #[serde(rename = "class")]
+    class_node: Option<IgnoredAny>,
+    subclass: Option<IgnoredAny>,
+    direct_parent: Option<IgnoredAny>,
+}
+
+impl ClassificationProbe {
+    #[inline]
+    fn has_classification(&self) -> bool {
+        self.direct_parent.is_some()
+            || self.kingdom.is_some()
+            || self.superclass.is_some()
+            || self.class_node.is_some()
+            || self.subclass.is_some()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{MockResponse, MockServer};
 
     #[test]
     fn validates_classified_entity() {
@@ -158,8 +170,7 @@ mod tests {
             content_type: Some("application/json".to_owned()),
             body: r#"{"inchikey":"InChIKey=IJDNQMDRQITEOD-UHFFFAOYSA-N","kingdom":{"name":"Organic compounds","description":"x","chemont_id":"CHEMONTID:0000000","url":"u"},"superclass":null,"class":null,"subclass":null,"intermediate_nodes":[],"direct_parent":{"name":"Alkanes","description":"x","chemont_id":"CHEMONTID:0002500","url":"u"},"alternative_parents":[],"substituents":[],"external_descriptors":[],"ancestors":[],"predicted_chebi_terms":[],"predicted_lipidmaps_terms":[]}"#.to_owned(),
         };
-        let entity = validate_entity_body(&body).unwrap().unwrap();
-        assert!(entity.has_classification());
+        assert!(validate_entity_body(&body).unwrap());
     }
 
     #[test]
@@ -172,5 +183,110 @@ mod tests {
         };
         let error = validate_entity_body(&body).unwrap_err().to_string();
         assert!(error.contains("returned HTML"));
+    }
+
+    #[test]
+    fn fetches_plain_404_as_miss() {
+        let server = MockServer::new([(
+            "/entities/XLYOFNOQVPJJNP-UHFFFAOYSA-N.json",
+            MockResponse::text(404, "missing"),
+        )]);
+        let client = ApiClient::new(server.url(), "classyfire-test/0.1", 1).unwrap();
+
+        let body = client.fetch_entity("XLYOFNOQVPJJNP-UHFFFAOYSA-N").unwrap();
+
+        assert!(!validate_entity_body(&body).unwrap());
+        assert_eq!(
+            server.seen_paths(),
+            vec!["/entities/XLYOFNOQVPJJNP-UHFFFAOYSA-N.json".to_owned()]
+        );
+    }
+
+    #[test]
+    fn fetches_429_as_throttle_error() {
+        let server = MockServer::new([(
+            "/entities/OTMSDBZUPAUEDD-UHFFFAOYSA-N.json",
+            MockResponse::text(429, "slow down"),
+        )]);
+        let client = ApiClient::new(server.url(), "classyfire-test/0.1", 1).unwrap();
+
+        let body = client.fetch_entity("OTMSDBZUPAUEDD-UHFFFAOYSA-N").unwrap();
+        let error = validate_entity_body(&body).unwrap_err().to_string();
+
+        assert!(error.contains("throttled"));
+    }
+
+    #[test]
+    fn fetches_html_body_as_error() {
+        let server = MockServer::new([(
+            "/entities/VNWKTOKETHGBQD-UHFFFAOYSA-N.json",
+            MockResponse::html(200, "<html><body>gateway timeout</body></html>"),
+        )]);
+        let client = ApiClient::new(server.url(), "classyfire-test/0.1", 1).unwrap();
+
+        let body = client.fetch_entity("VNWKTOKETHGBQD-UHFFFAOYSA-N").unwrap();
+        let error = validate_entity_body(&body).unwrap_err().to_string();
+
+        assert!(error.contains("returned HTML"));
+    }
+
+    #[test]
+    fn rejects_malformed_json_from_server() {
+        let server = MockServer::new([(
+            "/entities/VNWKTOKETHGBQD-UHFFFAOYSA-N.json",
+            MockResponse::json(200, "{"),
+        )]);
+        let client = ApiClient::new(server.url(), "classyfire-test/0.1", 1).unwrap();
+
+        let body = client.fetch_entity("VNWKTOKETHGBQD-UHFFFAOYSA-N").unwrap();
+        let error = validate_entity_body(&body).unwrap_err().to_string();
+
+        assert!(error.contains("failed to parse entity response JSON"));
+    }
+
+    #[test]
+    fn rejects_generic_server_error() {
+        let body = HttpBody {
+            status: 500,
+            content_type: Some("application/json".to_owned()),
+            body: r#"{"error":"boom"}"#.to_owned(),
+        };
+
+        let error = validate_entity_body(&body).unwrap_err().to_string();
+
+        assert!(error.contains("failed with status 500"));
+    }
+
+    #[test]
+    fn treats_empty_body_as_miss() {
+        let body = HttpBody {
+            status: 200,
+            content_type: Some("application/json".to_owned()),
+            body: "   ".to_owned(),
+        };
+
+        assert!(!validate_entity_body(&body).unwrap());
+    }
+
+    #[test]
+    fn recognizes_classification_without_direct_parent() {
+        let body = HttpBody {
+            status: 200,
+            content_type: Some("application/json".to_owned()),
+            body: r#"{"superclass":{"name":"Benzenoids"}}"#.to_owned(),
+        };
+
+        assert!(validate_entity_body(&body).unwrap());
+    }
+
+    #[test]
+    fn html_summary_falls_back_to_snippet_without_title() {
+        let summary = summarize_html_body("<html><body>gateway timeout from upstream</body></html>");
+        assert!(summary.starts_with("snippet:"));
+    }
+
+    #[test]
+    fn html_summary_handles_empty_html() {
+        assert_eq!(summarize_html_body("   "), "empty HTML body");
     }
 }

@@ -1,0 +1,169 @@
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
+
+#[derive(Debug, Clone)]
+pub struct MockResponse {
+    status: u16,
+    content_type: String,
+    body: String,
+}
+
+impl MockResponse {
+    pub fn json(status: u16, body: impl Into<String>) -> Self {
+        Self {
+            status,
+            content_type: "application/json".to_owned(),
+            body: body.into(),
+        }
+    }
+
+    pub fn text(status: u16, body: impl Into<String>) -> Self {
+        Self {
+            status,
+            content_type: "text/plain".to_owned(),
+            body: body.into(),
+        }
+    }
+
+    pub fn html(status: u16, body: impl Into<String>) -> Self {
+        Self {
+            status,
+            content_type: "text/html".to_owned(),
+            body: body.into(),
+        }
+    }
+}
+
+pub struct MockServer {
+    address: SocketAddr,
+    seen_paths: Arc<Mutex<Vec<String>>>,
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl MockServer {
+    pub fn new(routes: impl IntoIterator<Item = (impl Into<String>, MockResponse)>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("failed binding mock server");
+        listener
+            .set_nonblocking(true)
+            .expect("failed setting mock server nonblocking");
+        let address = listener.local_addr().expect("missing mock server address");
+        let routes = Arc::new(
+            routes
+                .into_iter()
+                .map(|(path, response)| (path.into(), response))
+                .collect::<HashMap<_, _>>(),
+        );
+        let seen_paths = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let thread_routes = Arc::clone(&routes);
+        let thread_seen_paths = Arc::clone(&seen_paths);
+        let thread_stop = Arc::clone(&stop);
+        let handle = thread::spawn(move || loop {
+            if thread_stop.load(Ordering::SeqCst) {
+                break;
+            }
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    handle_connection(stream, &thread_routes, &thread_seen_paths)
+                        .expect("mock server connection handling failed");
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("mock server accept failed: {error}"),
+            }
+        });
+
+        Self {
+            address,
+            seen_paths,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    pub fn url(&self) -> String {
+        format!("http://{}", self.address)
+    }
+
+    pub fn seen_paths(&self) -> Vec<String> {
+        self.seen_paths
+            .lock()
+            .expect("mock server seen_paths mutex poisoned")
+            .clone()
+    }
+}
+
+impl Drop for MockServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        let _ = TcpStream::connect(self.address);
+        if let Some(handle) = self.handle.take() {
+            handle.join().expect("mock server thread panicked");
+        }
+    }
+}
+
+fn handle_connection(
+    stream: TcpStream,
+    routes: &HashMap<String, MockResponse>,
+    seen_paths: &Mutex<Vec<String>>,
+) -> std::io::Result<()> {
+    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut request_line = String::new();
+    if reader.read_line(&mut request_line)? == 0 {
+        return Ok(());
+    }
+
+    let path = request_line
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or("/")
+        .to_owned();
+    loop {
+        let mut header_line = String::new();
+        if reader.read_line(&mut header_line)? == 0 || header_line == "\r\n" {
+            break;
+        }
+    }
+
+    seen_paths
+        .lock()
+        .expect("mock server seen_paths mutex poisoned")
+        .push(path.clone());
+
+    let response = routes
+        .get(&path)
+        .cloned()
+        .unwrap_or_else(|| MockResponse::text(404, "missing route"));
+    let status_text = status_text(response.status);
+    let mut writer = reader.into_inner();
+    write!(
+        writer,
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        response.status,
+        status_text,
+        response.content_type,
+        response.body.len(),
+        response.body
+    )?;
+    writer.flush()
+}
+
+fn status_text(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        404 => "Not Found",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        _ => "Test Response",
+    }
+}

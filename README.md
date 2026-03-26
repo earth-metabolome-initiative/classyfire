@@ -1,15 +1,12 @@
-# ClassyFire GET Downloader
+# ClassyFire Streaming Downloader
 
 [![CI](https://github.com/earth-metabolome-initiative/classyfire/actions/workflows/ci.yml/badge.svg)](https://github.com/earth-metabolome-initiative/classyfire/actions/workflows/ci.yml)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19235916.svg)](https://doi.org/10.5281/zenodo.19235916)
 [![license](https://img.shields.io/github/license/earth-metabolome-initiative/classyfire)](LICENSE)
 
-Rust downloader for importing PubChem `CID-InChI-Key` data into SQLite and crawling ClassyFire only through `GET /entities/{InChIKey}.json`.
+Rust downloader for streaming the PubChem `CID-InChI-Key` TSV and crawling ClassyFire only through `GET /entities/{InChIKey}.json`.
 
-> [!IMPORTANT]
-> We do not recommend running this tool yourself. We are already running it and publishing weekly Parquet snapshots to Zenodo. Once the public Zenodo record URL is in place, you should download the published dataset from there instead of placing additional load on the upstream ClassyFire service. The code is shared for transparency, reproducibility, and long-term stewardship of the recovered labels.
-
-This project exists to build a local, durable copy of ClassyFire labels for PubChem compounds. The goal is to recover as many stable ClassyFire classifications as possible into a dataset that can later be exported, audited, used to train or validate a local replacement, and periodically published as archival Zenodo releases.
+This project exists to build a local, durable copy of ClassyFire labels for PubChem compounds with a very small operational footprint. The crawler streams the input once, writes successful classifications directly into compressed output shards, and tracks terminal row states in compact bitmap files instead of a database.
 
 The code deliberately sticks to the `GET /entities/{InChIKey}.json` path because it has been much less fragile than the batch query flow. The batch endpoints were accepted by the server, but in practice they were too unreliable to drain at scale, with slow queues, throttling, HTML error pages, and multi-page result retrieval failures. This downloader therefore optimizes for boring long-run stability rather than maximum short-term throughput.
 
@@ -20,86 +17,59 @@ The code deliberately sticks to the `GET /entities/{InChIKey}.json` path because
 
 ## What It Does
 
-- imports the PubChem `CID-InChI-Key` dump into SQLite
-- resumes interrupted imports from a saved checkpoint
-- runs a single conservative GET loop over unresolved `InChIKey`s
-- stores raw successful ClassyFire JSON as compressed blobs
-- tracks `new`, `done`, `miss`, and `error` states
-- keeps durable aggregate counters for a small live TUI
-- exports recovered labels as JSONL and Parquet
-- can publish weekly Parquet snapshots to Zenodo when configured
+- streams the PubChem `CID-InChI-Key` TSV directly from plain text or `.zst`
+- calls `GET /entities/{InChIKey}.json` at a conservative fixed cadence
+- writes successful results directly into rotating `JSONL.zst` shards
+- tracks terminal row states in `mmap`ed bitmap files
+- resumes from a small checkpoint file
+- shows a small live TUI with the current key, recent results, and recent errors
 
-`run-get` always prefers untouched `new` rows. Once there are no `new` rows left, rerunning the same command on the same DB naturally revisits `error` rows and skips everything already classified or permanently missed.
+The crawler is row-oriented:
 
-## Main Commands
+- duplicate `InChIKey`s are allowed
+- each input row is handled independently
+- successful output keeps `CID`, `InChI`, `InChIKey`, and the full raw ClassyFire response
 
-Import PubChem:
+There is no SQLite database, no rebuild step, and no export step after the crawl. The success shards are the canonical artifact.
 
-```bash
-cargo run --release -- import-pubchem \
-  --db /mnt/bfd/classyfire/classyfire.sqlite \
-  --input /tmp/CID-InChI-Key.full.txt
-```
+## Main Command
 
 Run the downloader:
 
 ```bash
-cargo run --release -- run-get \
-  --db /mnt/bfd/classyfire/classyfire.sqlite
+cargo run --release -- run \
+  --input /data/CID-InChI-Key.full.txt.zst \
+  --output-dir /data/classyfire-run
 ```
 
-Inspect counts:
+The output directory will contain:
 
-```bash
-cargo run --release -- stats \
-  --db /mnt/bfd/classyfire/classyfire.sqlite
-```
-
-Export recovered labels:
-
-```bash
-cargo run --release -- export-labels \
-  --db /mnt/bfd/classyfire/classyfire.sqlite \
-  --output /mnt/bfd/classyfire/labels.jsonl
-```
-
-Export recovered labels as Parquet:
-
-```bash
-cargo run --release -- export-parquet \
-  --db /mnt/bfd/classyfire/classyfire.sqlite \
-  --output /mnt/bfd/classyfire/labels.parquet
-```
-
-Publish a Parquet snapshot to Zenodo immediately:
-
-```bash
-cargo run --release -- publish-zenodo \
-  --db /mnt/bfd/classyfire/classyfire.sqlite
-```
-
-Rebuild aggregate counters from stored raw JSON:
-
-```bash
-cargo run --release -- rebuild-counters \
-  --db /mnt/bfd/classyfire/classyfire.sqlite
+```text
+/data/classyfire-run/
+  checkpoint.json
+  state.success.bits
+  state.miss.bits
+  state.invalid.bits
+  state.failed.bits
+  success/
+    success-000001.jsonl.zst
+    success-000002.jsonl.zst
+    ...
 ```
 
 ## CLI View
 
-The downloader ships with a small live terminal dashboard so you can see the current key, request rate, DB state counts, top taxonomy counts, and recent errors while the crawl is running.
-
-![CLI screenshot](docs/assets/cli.png)
+The downloader ships with a small live terminal dashboard so you can see the current key, last result, and recent errors while the crawl is running.
 
 ## Defaults
 
 Runtime defaults are in `src/config.rs`:
 
-- database path default: `/mnt/bfd/classyfire/classyfire.sqlite`
 - GET cadence: `5s`
 - throttle backoff: `300s`
 - request timeout: `30s`
-- Zenodo publish interval: `604800s` (`7 days`)
+- status refresh: `1s`
+- success shard rotation: `100,000` records or `128 MiB`
 
 All operational defaults can be overridden with `CLASSYFIRE_*` environment variables. The binary loads them from `.env` automatically at startup.
 
@@ -109,19 +79,16 @@ Start by copying the checked-in example:
 cp .env.example .env
 ```
 
-Weekly Zenodo publishing is disabled unless both of these are set:
+## Terminal States
 
-- `ZENODO_TOKEN`
-- `CLASSYFIRE_ZENODO_DEPOSIT_ID`
+Each input row ends in exactly one terminal state:
 
-When they are present, `run-get` starts a background publisher thread that exports a Parquet snapshot and publishes a new Zenodo version every week.
+- `success`
+- `miss`
+- `invalid_input`
+- `failed`
 
-## Stored Data
-
-- `molecules`: one row per unique `InChIKey`, with state and raw successful JSON
-- `cid_map`: PubChem `CID -> InChIKey`
-- `state_counts`: cached totals for `new`, `done`, `miss`, `error`
-- `taxonomy_counts`: cached counts for kingdom, superclass, class, subclass, and direct parent
+Only `success` produces an explicit output record. The other states exist only in the bitmap files.
 
 ## License
 

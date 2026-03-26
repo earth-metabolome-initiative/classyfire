@@ -1,12 +1,7 @@
 pub mod api;
-pub mod compression;
 pub mod config;
-pub mod daemon;
-pub mod db;
-pub mod export;
-pub mod importer;
-pub mod models;
-pub mod schema;
-pub mod types;
+pub mod streaming;
 pub mod ui;
-pub mod zenodo;
+
+#[cfg(test)]
+pub mod test_support;

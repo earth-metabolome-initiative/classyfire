@@ -1,4 +1,3 @@
-use crate::db::{CounterEntry, RunnerSnapshot};
 use anyhow::Result;
 use chrono::Local;
 use crossterm::cursor::{Hide, MoveTo, Show};
@@ -29,21 +28,14 @@ struct UiInner {
 struct DashboardState {
     started_at: Instant,
     current_inchikey: Option<String>,
-    current_attempt: i32,
     last_result: Option<String>,
     get_backoff_reason: Option<String>,
     get_backoff_at: Option<String>,
-    session_requests: u64,
-    session_hits: u64,
-    session_misses: u64,
-    session_errors: u64,
     recent_events: VecDeque<String>,
     recent_errors: VecDeque<String>,
 }
 
-pub struct TerminalGuard {
-    active: bool,
-}
+pub struct TerminalGuard;
 
 impl Ui {
     pub fn new() -> Self {
@@ -53,14 +45,9 @@ impl Ui {
                 state: Mutex::new(DashboardState {
                     started_at: Instant::now(),
                     current_inchikey: None,
-                    current_attempt: 0,
                     last_result: None,
                     get_backoff_reason: None,
                     get_backoff_at: None,
-                    session_requests: 0,
-                    session_hits: 0,
-                    session_misses: 0,
-                    session_errors: 0,
                     recent_events: VecDeque::new(),
                     recent_errors: VecDeque::new(),
                 }),
@@ -78,7 +65,7 @@ impl Ui {
         }
         let mut stderr = io::stderr();
         crossterm::execute!(stderr, EnterAlternateScreen, DisableLineWrap, Hide)?;
-        Ok(Some(TerminalGuard { active: true }))
+        Ok(Some(TerminalGuard))
     }
 
     pub fn info(&self, message: impl Into<String>) {
@@ -91,16 +78,13 @@ impl Ui {
         push_ring(&mut state.recent_events, MAX_EVENTS, message);
     }
 
-    pub fn note_current_key(&self, inchikey: &str, attempt: i32) {
+    pub fn note_current_key(&self, inchikey: &str) {
         let mut state = self.inner.state.lock().expect("ui state mutex poisoned");
         state.current_inchikey = Some(inchikey.to_owned());
-        state.current_attempt = attempt;
-        state.session_requests += 1;
     }
 
     pub fn note_hit(&self, inchikey: &str) {
         let mut state = self.inner.state.lock().expect("ui state mutex poisoned");
-        state.session_hits += 1;
         state.last_result = Some(format!("hit {inchikey}"));
         push_ring(
             &mut state.recent_events,
@@ -111,7 +95,6 @@ impl Ui {
 
     pub fn note_miss(&self, inchikey: &str) {
         let mut state = self.inner.state.lock().expect("ui state mutex poisoned");
-        state.session_misses += 1;
         state.last_result = Some(format!("miss {inchikey}"));
         push_ring(
             &mut state.recent_events,
@@ -122,7 +105,6 @@ impl Ui {
 
     pub fn note_error(&self, inchikey: &str, error: &str) {
         let mut state = self.inner.state.lock().expect("ui state mutex poisoned");
-        state.session_errors += 1;
         state.last_result = Some(format!("error {inchikey}: {}", compact_error(error)));
         push_ring(
             &mut state.recent_errors,
@@ -142,64 +124,18 @@ impl Ui {
         );
     }
 
-    pub fn render_dashboard(
-        &self,
-        snapshot: &RunnerSnapshot,
-        get_ready_in_seconds: u64,
-    ) -> Result<()> {
+    pub fn render_dashboard(&self, get_ready_in_seconds: u64) -> Result<()> {
         if !self.is_interactive() {
             return Ok(());
         }
 
         let state = self.inner.state.lock().expect("ui state mutex poisoned");
-        let uptime_seconds = state.started_at.elapsed().as_secs().max(1);
-        let rate = state.session_requests as f64 / (uptime_seconds as f64 / 60.0);
         let (width, height) = size().unwrap_or((120, 36));
-
-        let mut lines = vec![
-            format!(
-                "ClassyFire GET downloader  {}",
-                Local::now().format("%Y-%m-%d %H:%M:%S")
-            ),
-            format!("uptime={}s | req_rate={:.2}/min", uptime_seconds, rate),
-            format!(
-                "current: {} attempt={} | get_gate={}{}",
-                state.current_inchikey.as_deref().unwrap_or("idle"),
-                state.current_attempt,
-                get_ready_in_seconds,
-                format_backoff(&state, get_ready_in_seconds),
-            ),
-            state.last_result.as_ref().map_or_else(
-                || "last result: none".to_owned(),
-                |value| format!("last result: {value}"),
-            ),
-            format!(
-                "session: requests={} hits={} misses={} errors={}",
-                state.session_requests,
-                state.session_hits,
-                state.session_misses,
-                state.session_errors
-            ),
-            format!(
-                "db counts: total={} new={} done={} miss={} error={}",
-                snapshot.stats.total_molecules,
-                snapshot.stats.new_count,
-                snapshot.stats.done_count,
-                snapshot.stats.miss_count,
-                snapshot.stats.error_count
-            ),
-            "top kingdoms:".to_owned(),
-        ];
-
-        push_counter_lines(&mut lines, &snapshot.top_kingdoms, 5);
-        lines.push("top superclasses:".to_owned());
-        push_counter_lines(&mut lines, &snapshot.top_superclasses, 5);
-        lines.push("top classes:".to_owned());
-        push_counter_lines(&mut lines, &snapshot.top_classes, 5);
-        lines.push("recent events:".to_owned());
-        push_recent_lines(&mut lines, &state.recent_events, MAX_EVENTS, "  (none)");
-        lines.push("recent errors:".to_owned());
-        push_recent_lines(&mut lines, &state.recent_errors, MAX_ERRORS, "  (none)");
+        let lines = build_dashboard_lines(
+            &state,
+            get_ready_in_seconds,
+            &Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        );
 
         let mut stderr = io::stderr();
         queue!(
@@ -230,9 +166,6 @@ impl Default for Ui {
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        if !self.active {
-            return;
-        }
         let mut stderr = io::stderr();
         let _ = crossterm::execute!(stderr, Show, EnableLineWrap, LeaveAlternateScreen);
     }
@@ -247,6 +180,33 @@ fn format_backoff(state: &DashboardState, get_ready_in_seconds: u64) -> String {
         (Some(reason), None) => format!(" reason={reason}"),
         _ => String::new(),
     }
+}
+
+fn build_dashboard_lines(
+    state: &DashboardState,
+    get_ready_in_seconds: u64,
+    now: &str,
+) -> Vec<String> {
+    let mut lines = vec![
+        format!("ClassyFire GET downloader  {now}"),
+        format!("uptime={}s", state.started_at.elapsed().as_secs().max(1)),
+        format!(
+            "current: {} | get_gate={}{}",
+            state.current_inchikey.as_deref().unwrap_or("idle"),
+            get_ready_in_seconds,
+            format_backoff(state, get_ready_in_seconds),
+        ),
+        state.last_result.as_ref().map_or_else(
+            || "last result: none".to_owned(),
+            |value| format!("last result: {value}"),
+        ),
+        "recent events:".to_owned(),
+    ];
+
+    push_recent_lines(&mut lines, &state.recent_events, MAX_EVENTS, "  (none)");
+    lines.push("recent errors:".to_owned());
+    push_recent_lines(&mut lines, &state.recent_errors, MAX_ERRORS, "  (none)");
+    lines
 }
 
 fn compact_error(error: &str) -> String {
@@ -264,16 +224,6 @@ fn compact_error(error: &str) -> String {
         return "transport".to_owned();
     }
     "error".to_owned()
-}
-
-fn push_counter_lines(lines: &mut Vec<String>, counters: &[CounterEntry], max_lines: usize) {
-    if counters.is_empty() {
-        lines.push("  (none)".to_owned());
-        return;
-    }
-    for counter in counters.iter().take(max_lines) {
-        lines.push(format!("  {} = {}", counter.label, counter.count));
-    }
 }
 
 fn push_recent_lines(
@@ -366,11 +316,7 @@ fn write_styled_line(stderr: &mut io::Stderr, line: &str, width: usize) -> Resul
 fn is_section_header(line: &str) -> bool {
     matches!(
         line,
-        "top kingdoms:"
-            | "top superclasses:"
-            | "top classes:"
-            | "recent events:"
-            | "recent errors:"
+        "recent events:" | "recent errors:"
     )
 }
 
@@ -384,10 +330,58 @@ fn timestamp() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::ellipsize_to_width;
+    use super::*;
+    use std::time::Duration;
 
     #[test]
     fn ellipsize_reserves_last_column() {
         assert_eq!(ellipsize_to_width("abcdefghij", 10), "abcdefgh…");
+    }
+
+    #[test]
+    fn dashboard_lines_include_backoff_and_recent_entries() {
+        let mut recent_events = VecDeque::new();
+        recent_events.push_back("[12:00:00] hit VNWKTOKETHGBQD-UHFFFAOYSA-N".to_owned());
+        let mut recent_errors = VecDeque::new();
+        recent_errors.push_back("[12:00:01] error XLYOFNOQVPJJNP-UHFFFAOYSA-N: timeout".to_owned());
+        let state = DashboardState {
+            started_at: Instant::now() - Duration::from_secs(5),
+            current_inchikey: Some("VNWKTOKETHGBQD-UHFFFAOYSA-N".to_owned()),
+            last_result: Some("hit VNWKTOKETHGBQD-UHFFFAOYSA-N".to_owned()),
+            get_backoff_reason: Some("throttle".to_owned()),
+            get_backoff_at: Some("12:00:02".to_owned()),
+            recent_events,
+            recent_errors,
+        };
+
+        let lines = build_dashboard_lines(&state, 30, "2026-03-26 18:10:00");
+
+        assert_eq!(lines[0], "ClassyFire GET downloader  2026-03-26 18:10:00");
+        assert!(lines[2].contains("get_gate=30"));
+        assert!(lines[2].contains("reason=throttle since=12:00:02"));
+        assert!(lines.iter().any(|line| line.contains("recent events:")));
+        assert!(lines.iter().any(|line| line.contains("recent errors:")));
+        assert!(lines.iter().any(|line| line.contains("timeout")));
+    }
+
+    #[test]
+    fn compact_error_classifies_known_cases() {
+        assert_eq!(compact_error("entity request was throttled"), "throttled");
+        assert_eq!(compact_error("entity request returned HTML"), "html");
+        assert_eq!(compact_error("operation timed out"), "timeout");
+        assert_eq!(compact_error("failed GET /entities request"), "transport");
+        assert_eq!(compact_error("something else"), "error");
+    }
+
+    #[test]
+    fn push_ring_keeps_only_the_most_recent_entries() {
+        let mut ring = VecDeque::new();
+        push_ring(&mut ring, 2, "first".to_owned());
+        push_ring(&mut ring, 2, "second".to_owned());
+        push_ring(&mut ring, 2, "third".to_owned());
+
+        assert_eq!(ring.len(), 2);
+        assert!(ring[0].contains("second"));
+        assert!(ring[1].contains("third"));
     }
 }

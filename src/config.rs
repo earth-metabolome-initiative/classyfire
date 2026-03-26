@@ -3,15 +3,14 @@ use clap::{Args, Parser, Subcommand};
 use std::env;
 use std::path::PathBuf;
 
-pub const DEFAULT_DB_PATH: &str = "/mnt/bfd/classyfire/classyfire.sqlite";
 pub const DEFAULT_BASE_URL: &str = "http://classyfire.wishartlab.com";
 pub const DEFAULT_USER_AGENT: &str = "classyfire-get-downloader/0.1";
-pub const DEFAULT_IMPORT_CHUNK_SIZE: usize = 100000;
 pub const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
 pub const DEFAULT_GET_SLEEP_SECONDS: u64 = 5;
 pub const DEFAULT_THROTTLE_BACKOFF_SECONDS: u64 = 300;
 pub const DEFAULT_STATUS_INTERVAL_SECONDS: u64 = 1;
-pub const DEFAULT_ZENODO_PUBLISH_INTERVAL_SECONDS: u64 = 7 * 24 * 60 * 60;
+pub const DEFAULT_SUCCESS_SHARD_MAX_RECORDS: u64 = 100_000;
+pub const DEFAULT_SUCCESS_SHARD_MAX_BYTES: u64 = 128 * 1024 * 1024;
 
 #[derive(Debug, Parser)]
 #[command(name = "classyfire-crawler")]
@@ -23,63 +22,40 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    ImportPubchem(ImportPubchemArgs),
-    RunGet(DbArgs),
-    Stats(DbArgs),
-    ExportLabels(ExportLabelsArgs),
-    ExportParquet(ExportParquetArgs),
-    PublishZenodo(DbArgs),
-    RebuildCounters(DbArgs),
+    Run(StreamArgs),
 }
 
 #[derive(Debug, Args, Clone)]
-pub struct DbArgs {
-    #[arg(long, env = "CLASSYFIRE_DB", default_value = DEFAULT_DB_PATH)]
-    pub db: PathBuf,
-}
-
-#[derive(Debug, Args, Clone)]
-pub struct ImportPubchemArgs {
-    #[command(flatten)]
-    pub db_args: DbArgs,
+pub struct StreamArgs {
     #[arg(long)]
     pub input: PathBuf,
-}
-
-#[derive(Debug, Args, Clone)]
-pub struct ExportLabelsArgs {
-    #[command(flatten)]
-    pub db_args: DbArgs,
     #[arg(long)]
-    pub output: PathBuf,
-}
-
-#[derive(Debug, Args, Clone)]
-pub struct ExportParquetArgs {
-    #[command(flatten)]
-    pub db_args: DbArgs,
-    #[arg(long)]
-    pub output: PathBuf,
+    pub output_dir: PathBuf,
+    #[arg(long, default_value_t = DEFAULT_SUCCESS_SHARD_MAX_RECORDS)]
+    pub success_shard_max_records: u64,
+    #[arg(long, default_value_t = DEFAULT_SUCCESS_SHARD_MAX_BYTES)]
+    pub success_shard_max_bytes: u64,
 }
 
 #[derive(Debug, Clone)]
-pub struct RuntimeConfig {
-    pub db: PathBuf,
+pub struct StreamConfig {
+    pub input: PathBuf,
+    pub output_dir: PathBuf,
     pub base_url: String,
     pub user_agent: String,
     pub timeout_seconds: u64,
     pub get_sleep_seconds: u64,
     pub throttle_backoff_seconds: u64,
     pub status_interval_seconds: u64,
-    pub zenodo_token: Option<String>,
-    pub zenodo_deposit_id: Option<String>,
-    pub zenodo_publish_interval_seconds: u64,
+    pub success_shard_max_records: u64,
+    pub success_shard_max_bytes: u64,
 }
 
-impl RuntimeConfig {
-    pub fn from_env(db: PathBuf) -> Self {
+impl StreamConfig {
+    pub fn from_env(args: StreamArgs) -> Self {
         Self {
-            db,
+            input: args.input,
+            output_dir: args.output_dir,
             base_url: env_string("CLASSYFIRE_BASE_URL", DEFAULT_BASE_URL),
             user_agent: env_string("CLASSYFIRE_USER_AGENT", DEFAULT_USER_AGENT),
             timeout_seconds: env_u64("CLASSYFIRE_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS),
@@ -92,13 +68,8 @@ impl RuntimeConfig {
                 "CLASSYFIRE_STATUS_INTERVAL_SECONDS",
                 DEFAULT_STATUS_INTERVAL_SECONDS,
             ),
-            zenodo_token: env_string_opt("ZENODO_TOKEN"),
-            zenodo_deposit_id: env_string_opt("CLASSYFIRE_ZENODO_DEPOSIT_ID")
-                .or_else(|| env_string_opt("ZENODO_DEPOSIT_ID")),
-            zenodo_publish_interval_seconds: env_u64(
-                "CLASSYFIRE_ZENODO_PUBLISH_INTERVAL_SECONDS",
-                DEFAULT_ZENODO_PUBLISH_INTERVAL_SECONDS,
-            ),
+            success_shard_max_records: args.success_shard_max_records,
+            success_shard_max_bytes: args.success_shard_max_bytes,
         }
     }
 
@@ -109,39 +80,18 @@ impl RuntimeConfig {
         if self.status_interval_seconds == 0 {
             bail!("CLASSYFIRE_STATUS_INTERVAL_SECONDS must be greater than zero");
         }
-        if self.zenodo_token.is_some() ^ self.zenodo_deposit_id.is_some() {
-            bail!(
-                "ZENODO_TOKEN and CLASSYFIRE_ZENODO_DEPOSIT_ID must both be set to enable publishing"
-            );
+        if self.success_shard_max_records == 0 {
+            bail!("--success-shard-max-records must be greater than zero");
         }
-        if self.zenodo_token.is_some() && self.zenodo_publish_interval_seconds == 0 {
-            bail!("CLASSYFIRE_ZENODO_PUBLISH_INTERVAL_SECONDS must be greater than zero");
+        if self.success_shard_max_bytes == 0 {
+            bail!("--success-shard-max-bytes must be greater than zero");
         }
         Ok(())
     }
-
-    pub fn zenodo_config(&self) -> Option<ZenodoConfig> {
-        Some(ZenodoConfig {
-            token: self.zenodo_token.clone()?,
-            deposit_id: self.zenodo_deposit_id.clone()?,
-            publish_interval_seconds: self.zenodo_publish_interval_seconds,
-        })
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ZenodoConfig {
-    pub token: String,
-    pub deposit_id: String,
-    pub publish_interval_seconds: u64,
 }
 
 fn env_string(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_owned())
-}
-
-fn env_string_opt(key: &str) -> Option<String> {
-    env::var(key).ok().filter(|value| !value.is_empty())
 }
 
 fn env_u64(key: &str, default: u64) -> u64 {
@@ -149,4 +99,139 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl EnvGuard {
+        fn set(vars: &[(&'static str, &str)]) -> Self {
+            let saved = vars
+                .iter()
+                .map(|(key, _)| (*key, env::var_os(key)))
+                .collect::<Vec<_>>();
+            for (key, value) in vars {
+                env::set_var(key, value);
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.saved.drain(..) {
+                match value {
+                    Some(value) => env::set_var(key, value),
+                    None => env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn parses_run_cli_args() {
+        let cli = Cli::try_parse_from([
+            "classyfire-crawler",
+            "run",
+            "--input",
+            "input.tsv.zst",
+            "--output-dir",
+            "run-dir",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Run(args) => {
+                assert_eq!(args.input, PathBuf::from("input.tsv.zst"));
+                assert_eq!(args.output_dir, PathBuf::from("run-dir"));
+                assert_eq!(args.success_shard_max_records, DEFAULT_SUCCESS_SHARD_MAX_RECORDS);
+                assert_eq!(args.success_shard_max_bytes, DEFAULT_SUCCESS_SHARD_MAX_BYTES);
+            }
+        }
+    }
+
+    #[test]
+    fn stream_config_uses_environment_overrides() {
+        let _lock = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let _env = EnvGuard::set(&[
+            ("CLASSYFIRE_BASE_URL", "http://127.0.0.1:9999"),
+            ("CLASSYFIRE_USER_AGENT", "classyfire-test/0.1"),
+            ("CLASSYFIRE_TIMEOUT_SECONDS", "9"),
+            ("CLASSYFIRE_GET_SLEEP_SECONDS", "7"),
+            ("CLASSYFIRE_THROTTLE_BACKOFF_SECONDS", "11"),
+            ("CLASSYFIRE_STATUS_INTERVAL_SECONDS", "13"),
+        ]);
+
+        let config = StreamConfig::from_env(StreamArgs {
+            input: PathBuf::from("input.tsv"),
+            output_dir: PathBuf::from("out"),
+            success_shard_max_records: 42,
+            success_shard_max_bytes: 99,
+        });
+
+        assert_eq!(config.base_url, "http://127.0.0.1:9999");
+        assert_eq!(config.user_agent, "classyfire-test/0.1");
+        assert_eq!(config.timeout_seconds, 9);
+        assert_eq!(config.get_sleep_seconds, 7);
+        assert_eq!(config.throttle_backoff_seconds, 11);
+        assert_eq!(config.status_interval_seconds, 13);
+        assert_eq!(config.success_shard_max_records, 42);
+        assert_eq!(config.success_shard_max_bytes, 99);
+    }
+
+    #[test]
+    fn validate_rejects_zero_get_sleep() {
+        let mut config = StreamConfig::from_env(StreamArgs {
+            input: PathBuf::from("input.tsv"),
+            output_dir: PathBuf::from("out"),
+            success_shard_max_records: 1,
+            success_shard_max_bytes: 1,
+        });
+        config.get_sleep_seconds = 0;
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("CLASSYFIRE_GET_SLEEP_SECONDS"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_status_interval() {
+        let mut config = StreamConfig::from_env(StreamArgs {
+            input: PathBuf::from("input.tsv"),
+            output_dir: PathBuf::from("out"),
+            success_shard_max_records: 1,
+            success_shard_max_bytes: 1,
+        });
+        config.status_interval_seconds = 0;
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("CLASSYFIRE_STATUS_INTERVAL_SECONDS"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_shard_limits() {
+        let mut config = StreamConfig::from_env(StreamArgs {
+            input: PathBuf::from("input.tsv"),
+            output_dir: PathBuf::from("out"),
+            success_shard_max_records: 1,
+            success_shard_max_bytes: 1,
+        });
+        config.success_shard_max_records = 0;
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("--success-shard-max-records"));
+
+        config.success_shard_max_records = 1;
+        config.success_shard_max_bytes = 0;
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("--success-shard-max-bytes"));
+    }
 }
