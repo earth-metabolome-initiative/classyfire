@@ -51,8 +51,10 @@ pub fn run_streaming(config: StreamConfig) -> Result<()> {
         &config.user_agent,
         config.timeout_seconds,
     )?);
+    let ntfy_url = ntfy_client.subscription_url();
+    ui.set_ntfy_url(&ntfy_url);
 
-    eprintln!("ntfy status URL: {}", ntfy_client.subscription_url());
+    eprintln!("ntfy status URL: {ntfy_url}");
 
     {
         let running = Arc::clone(&running);

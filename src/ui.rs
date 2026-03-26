@@ -27,6 +27,7 @@ struct UiInner {
 
 struct DashboardState {
     started_at: Instant,
+    ntfy_url: Option<String>,
     current_inchikey: Option<String>,
     last_result: Option<String>,
     get_backoff_reason: Option<String>,
@@ -44,6 +45,7 @@ impl Ui {
                 interactive: io::stderr().is_terminal(),
                 state: Mutex::new(DashboardState {
                     started_at: Instant::now(),
+                    ntfy_url: None,
                     current_inchikey: None,
                     last_result: None,
                     get_backoff_reason: None,
@@ -76,6 +78,11 @@ impl Ui {
         }
         let mut state = self.inner.state.lock().expect("ui state mutex poisoned");
         push_ring(&mut state.recent_events, MAX_EVENTS, message);
+    }
+
+    pub fn set_ntfy_url(&self, url: &str) {
+        let mut state = self.inner.state.lock().expect("ui state mutex poisoned");
+        state.ntfy_url = Some(url.to_owned());
     }
 
     pub fn note_current_key(&self, inchikey: &str) {
@@ -190,6 +197,10 @@ fn build_dashboard_lines(
     let mut lines = vec![
         format!("ClassyFire GET downloader  {now}"),
         format!("uptime={}s", state.started_at.elapsed().as_secs().max(1)),
+        state.ntfy_url.as_ref().map_or_else(
+            || "ntfy: (not initialized)".to_owned(),
+            |value| format!("ntfy: {value}"),
+        ),
         format!(
             "current: {} | get_gate={}{}",
             state.current_inchikey.as_deref().unwrap_or("idle"),
@@ -343,6 +354,7 @@ mod tests {
         recent_errors.push_back("[12:00:01] error XLYOFNOQVPJJNP-UHFFFAOYSA-N: timeout".to_owned());
         let state = DashboardState {
             started_at: Instant::now() - Duration::from_secs(5),
+            ntfy_url: Some("https://ntfy.sh/topic-123".to_owned()),
             current_inchikey: Some("VNWKTOKETHGBQD-UHFFFAOYSA-N".to_owned()),
             last_result: Some("hit VNWKTOKETHGBQD-UHFFFAOYSA-N".to_owned()),
             get_backoff_reason: Some("throttle".to_owned()),
@@ -354,8 +366,9 @@ mod tests {
         let lines = build_dashboard_lines(&state, 30, "2026-03-26 18:10:00");
 
         assert_eq!(lines[0], "ClassyFire GET downloader  2026-03-26 18:10:00");
-        assert!(lines[2].contains("get_gate=30"));
-        assert!(lines[2].contains("reason=throttle since=12:00:02"));
+        assert_eq!(lines[2], "ntfy: https://ntfy.sh/topic-123");
+        assert!(lines[3].contains("get_gate=30"));
+        assert!(lines[3].contains("reason=throttle since=12:00:02"));
         assert!(lines.iter().any(|line| line.contains("recent events:")));
         assert!(lines.iter().any(|line| line.contains("recent errors:")));
         assert!(lines.iter().any(|line| line.contains("timeout")));
