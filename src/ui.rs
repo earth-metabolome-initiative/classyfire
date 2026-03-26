@@ -131,7 +131,7 @@ impl Ui {
         );
     }
 
-    pub fn render_dashboard(&self, get_ready_in_seconds: u64) -> Result<()> {
+    pub fn render_dashboard(&self, get_ready_in_seconds: u64, completed_count: u64) -> Result<()> {
         if !self.is_interactive() {
             return Ok(());
         }
@@ -141,6 +141,7 @@ impl Ui {
         let lines = build_dashboard_lines(
             &state,
             get_ready_in_seconds,
+            completed_count,
             &Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         );
 
@@ -192,8 +193,11 @@ fn format_backoff(state: &DashboardState, get_ready_in_seconds: u64) -> String {
 fn build_dashboard_lines(
     state: &DashboardState,
     get_ready_in_seconds: u64,
+    completed_count: u64,
     now: &str,
 ) -> Vec<String> {
+    let elapsed_seconds = state.started_at.elapsed().as_secs_f64().max(1.0);
+    let completed_per_minute = completed_count as f64 * 60.0 / elapsed_seconds;
     let mut lines = vec![
         format!("ClassyFire GET downloader  {now}"),
         format!("uptime={}s", state.started_at.elapsed().as_secs().max(1)),
@@ -201,6 +205,7 @@ fn build_dashboard_lines(
             || "ntfy: (not initialized)".to_owned(),
             |value| format!("ntfy: {value}"),
         ),
+        format!("completed_per_min={completed_per_minute:.2}"),
         format!(
             "current: {} | get_gate={}{}",
             state.current_inchikey.as_deref().unwrap_or("idle"),
@@ -363,12 +368,13 @@ mod tests {
             recent_errors,
         };
 
-        let lines = build_dashboard_lines(&state, 30, "2026-03-26 18:10:00");
+        let lines = build_dashboard_lines(&state, 30, 12, "2026-03-26 18:10:00");
 
         assert_eq!(lines[0], "ClassyFire GET downloader  2026-03-26 18:10:00");
         assert_eq!(lines[2], "ntfy: https://ntfy.sh/topic-123");
-        assert!(lines[3].contains("get_gate=30"));
-        assert!(lines[3].contains("reason=throttle since=12:00:02"));
+        assert!(lines[3].contains("completed_per_min="));
+        assert!(lines[4].contains("get_gate=30"));
+        assert!(lines[4].contains("reason=throttle since=12:00:02"));
         assert!(lines.iter().any(|line| line.contains("recent events:")));
         assert!(lines.iter().any(|line| line.contains("recent errors:")));
         assert!(lines.iter().any(|line| line.contains("timeout")));

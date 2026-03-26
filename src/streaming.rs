@@ -93,10 +93,11 @@ pub fn run_streaming(config: StreamConfig) -> Result<()> {
     let reporter_handle = if ui.is_interactive() {
         let running = Arc::clone(&running);
         let get_limiter = Arc::clone(&get_limiter);
+        let counters = Arc::clone(&counters);
         let ui = Arc::clone(&ui);
         let status_interval_seconds = config.status_interval_seconds;
         Some(thread::spawn(move || {
-            run_stream_reporter(running, get_limiter, ui, status_interval_seconds)
+            run_stream_reporter(running, get_limiter, counters, ui, status_interval_seconds)
         }))
     } else {
         None
@@ -349,13 +350,17 @@ fn run_ntfy_reporter(
 fn run_stream_reporter(
     running: Arc<AtomicBool>,
     get_limiter: Arc<GetRateLimiter>,
+    counters: Arc<ProgressCounters>,
     ui: Arc<Ui>,
     status_interval_seconds: u64,
 ) -> Result<()> {
     let _terminal = ui.enter_terminal()?;
     while running.load(Ordering::SeqCst) {
         if ui.is_interactive() {
-            ui.render_dashboard(get_limiter.seconds_until_ready())?;
+            ui.render_dashboard(
+                get_limiter.seconds_until_ready(),
+                counters.snapshot().completed(),
+            )?;
         }
         if !sleep_until_stop(&running, status_interval_seconds) {
             break;
@@ -1907,8 +1912,14 @@ mod tests {
         let ui = Arc::new(Ui::new());
         let limiter = test_limiter();
         let running = Arc::new(AtomicBool::new(false));
+        let counters = Arc::new(ProgressCounters::from_snapshot(ProgressSnapshot {
+            success: 0,
+            miss: 0,
+            invalid: 0,
+            failed: 0,
+        }));
 
-        run_stream_reporter(running, limiter, ui, 1).unwrap();
+        run_stream_reporter(running, limiter, counters, ui, 1).unwrap();
     }
 
     #[test]
