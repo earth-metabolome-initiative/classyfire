@@ -6,15 +6,17 @@
 
 Rust downloader for importing PubChem `CID-InChI-Key` data into SQLite and crawling ClassyFire only through `GET /entities/{InChIKey}.json`.
 
-We do not recommend running this tool yourself. We are already running it and publishing weekly Parquet snapshots to Zenodo. Once the public Zenodo record URL is in place, you should download the published dataset from there instead of placing additional load on the upstream ClassyFire service. The code is shared for transparency, reproducibility, and long-term stewardship of the recovered labels.
+> [!IMPORTANT]
+> We do not recommend running this tool yourself. We are already running it and publishing weekly Parquet snapshots to Zenodo. Once the public Zenodo record URL is in place, you should download the published dataset from there instead of placing additional load on the upstream ClassyFire service. The code is shared for transparency, reproducibility, and long-term stewardship of the recovered labels.
 
 This project exists to build a local, durable copy of ClassyFire labels for PubChem compounds. The goal is to recover as many stable ClassyFire classifications as possible into a dataset that can later be exported, audited, used to train or validate a local replacement, and periodically published as archival Zenodo releases.
 
 The code deliberately sticks to the `GET /entities/{InChIKey}.json` path because it has been much less fragile than the batch query flow. The batch endpoints were accepted by the server, but in practice they were too unreliable to drain at scale, with slow queues, throttling, HTML error pages, and multi-page result retrieval failures. This downloader therefore optimizes for boring long-run stability rather than maximum short-term throughput.
 
-The underlying service should also be treated with caution. The original ClassyFire paper presents the system as a freely accessible large-scale API and discusses a path toward full open sourcing, but in practice the public service has been unreliable for bulk access and the historical software stack depended on proprietary ChemAxon components. This project therefore assumes that long-term durability must come from local copies, local exports, and periodic archival releases rather than trust in the upstream service remaining stable or fully reproducible.
-
-This also means the full PubChem crawl is extremely slow. PubChem currently contributes about 123.1 million unique `InChIKey`s. At the observed live rate of roughly 3.1 GET requests per minute, a full pass would take on the order of 75 years. Even at the nominal 5-second cadence used by this downloader (12 requests per minute), a full pass would still take about 19.5 years. In other words, this is a long-running label recovery project, not a short-term scrape.
+> [!WARNING]
+> The underlying service should be treated with caution. The original ClassyFire paper presents the system as a freely accessible large-scale API and discusses a path toward full open sourcing, but in practice the public service has been unreliable for bulk access and the historical software stack depended on proprietary ChemAxon components. This project therefore assumes that long-term durability must come from local copies, local exports, and periodic archival releases rather than trust in the upstream service remaining stable or fully reproducible.
+>
+> The full PubChem crawl is also extremely slow. PubChem currently contributes about 123.1 million unique `InChIKey`s. At the observed live rate of roughly 3.1 GET requests per minute, a full pass would take on the order of 75 years. Even at the nominal 5-second cadence used by this downloader (12 requests per minute), a full pass would still take about 19.5 years. In other words, this is a long-running label recovery project, not a short-term scrape.
 
 ## What It Does
 
