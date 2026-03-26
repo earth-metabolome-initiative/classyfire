@@ -83,10 +83,6 @@ cargo run --release -- notify-zenodo-release \
 
 That posts a one-off ntfy message announcing the completed release URL.
 
-## CLI View
-
-The downloader ships with a small live terminal dashboard so you can see the current key, last result, and recent errors while the crawl is running.
-
 ## Defaults
 
 Runtime defaults are in `src/config.rs`:
