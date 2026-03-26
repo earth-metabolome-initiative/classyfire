@@ -2,16 +2,19 @@ use crate::api::{validate_entity_body, ApiClient};
 use crate::config::StreamConfig;
 use crate::ui::Ui;
 use anyhow::{anyhow, bail, Context, Result};
+use chrono::{DateTime, Days, TimeZone, Utc};
 use memmap2::{MmapMut, MmapOptions};
+use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, sleep};
 use std::time::{Duration, Instant, UNIX_EPOCH};
+use uuid::Uuid;
 
 const BITMAP_GROWTH_BITS: u64 = 1 << 20;
 const SUCCESS_BITMAP_NAME: &str = "state.success.bits";
@@ -25,9 +28,27 @@ pub fn run_streaming(config: StreamConfig) -> Result<()> {
     config.validate()?;
     ensure_output_dirs(&config.output_dir)?;
 
+    let input_meta = read_input_metadata(&config.input)?;
+    let checkpoint_path = config.output_dir.join(CHECKPOINT_NAME);
+    let mut checkpoint = load_or_init_checkpoint(&checkpoint_path, &config.input, &input_meta)?;
+    let ntfy_topic = checkpoint.ensure_ntfy_topic();
+    save_checkpoint(&checkpoint_path, &checkpoint)?;
+    let counters = Arc::new(ProgressCounters::from_snapshot(
+        StateBitmaps::open(&config.output_dir, checkpoint.current_row_index + 1)?
+            .snapshot_counts()?,
+    ));
+
     let running = Arc::new(AtomicBool::new(true));
     let get_limiter = Arc::new(GetRateLimiter::new(config.get_sleep_seconds));
     let ui = Arc::new(Ui::new());
+    let ntfy_client = Arc::new(NtfyClient::new(
+        &config.ntfy_base_url,
+        ntfy_topic,
+        &config.user_agent,
+        config.timeout_seconds,
+    )?);
+
+    eprintln!("ntfy status URL: {}", ntfy_client.subscription_url());
 
     {
         let running = Arc::clone(&running);
@@ -44,8 +65,9 @@ pub fn run_streaming(config: StreamConfig) -> Result<()> {
         let running = Arc::clone(&running);
         let get_limiter = Arc::clone(&get_limiter);
         let ui = Arc::clone(&ui);
+        let counters = Arc::clone(&counters);
         let config = config.clone();
-        thread::spawn(move || run_stream_worker(running, get_limiter, ui, config))
+        thread::spawn(move || run_stream_worker(running, get_limiter, ui, counters, config))
     };
 
     let reporter_handle = if ui.is_interactive() {
@@ -60,6 +82,16 @@ pub fn run_streaming(config: StreamConfig) -> Result<()> {
         None
     };
 
+    let ntfy_handle = {
+        let running = Arc::clone(&running);
+        let counters = Arc::clone(&counters);
+        let ui = Arc::clone(&ui);
+        let ntfy_client = Arc::clone(&ntfy_client);
+        Some(thread::spawn(move || {
+            run_ntfy_reporter(running, counters, ui, ntfy_client)
+        }))
+    };
+
     worker_handle
         .join()
         .map_err(|_| anyhow!("stream worker panicked"))??;
@@ -69,6 +101,11 @@ pub fn run_streaming(config: StreamConfig) -> Result<()> {
             .join()
             .map_err(|_| anyhow!("stream reporter panicked"))??;
     }
+    if let Some(ntfy_handle) = ntfy_handle {
+        ntfy_handle
+            .join()
+            .map_err(|_| anyhow!("ntfy reporter panicked"))??;
+    }
     Ok(())
 }
 
@@ -76,6 +113,7 @@ fn run_stream_worker(
     running: Arc<AtomicBool>,
     get_limiter: Arc<GetRateLimiter>,
     ui: Arc<Ui>,
+    counters: Arc<ProgressCounters>,
     config: StreamConfig,
 ) -> Result<()> {
     ensure_output_dirs(&config.output_dir)?;
@@ -133,6 +171,7 @@ fn run_stream_worker(
                     &mut bitmaps,
                     &checkpoint_path,
                     &mut checkpoint,
+                    &counters,
                     current_row,
                     RowState::InvalidInput,
                     &writer,
@@ -142,14 +181,12 @@ fn run_stream_worker(
         };
 
         if !is_valid_inchikey(&inchikey) {
-            ui.note_error(
-                &inchikey,
-                "invalid inchikey format in PubChem input",
-            );
+            ui.note_error(&inchikey, "invalid inchikey format in PubChem input");
             persist_terminal_state(
                 &mut bitmaps,
                 &checkpoint_path,
                 &mut checkpoint,
+                &counters,
                 current_row,
                 RowState::InvalidInput,
                 &writer,
@@ -182,6 +219,7 @@ fn run_stream_worker(
                     &mut bitmaps,
                     &checkpoint_path,
                     &mut checkpoint,
+                    &counters,
                     current_row,
                     RowState::Success,
                     &writer,
@@ -193,6 +231,7 @@ fn run_stream_worker(
                     &mut bitmaps,
                     &checkpoint_path,
                     &mut checkpoint,
+                    &counters,
                     current_row,
                     RowState::Miss,
                     &writer,
@@ -212,6 +251,7 @@ fn run_stream_worker(
                     &mut bitmaps,
                     &checkpoint_path,
                     &mut checkpoint,
+                    &counters,
                     current_row,
                     RowState::Failed,
                     &writer,
@@ -223,6 +263,29 @@ fn run_stream_worker(
     writer.finish()?;
     bitmaps.flush_all()?;
     save_checkpoint(&checkpoint_path, &checkpoint)?;
+    Ok(())
+}
+
+fn run_ntfy_reporter(
+    running: Arc<AtomicBool>,
+    counters: Arc<ProgressCounters>,
+    ui: Arc<Ui>,
+    ntfy_client: Arc<NtfyClient>,
+) -> Result<()> {
+    loop {
+        let now = Utc::now();
+        let next_publish_at = next_ntfy_publish_after(now);
+        let wait_for = (next_publish_at - now).to_std().unwrap_or(Duration::ZERO);
+        if !sleep_until_stop_with_granularity(&running, wait_for, Duration::from_secs(1)) {
+            break;
+        }
+        let snapshot = counters.snapshot();
+        if let Err(error) = ntfy_client.publish_daily_status(snapshot) {
+            ui.info(format!("ntfy publish failed: {error:#}"));
+        } else {
+            ui.info("published ntfy daily status");
+        }
+    }
     Ok(())
 }
 
@@ -248,12 +311,14 @@ fn persist_terminal_state(
     bitmaps: &mut StateBitmaps,
     checkpoint_path: &Path,
     checkpoint: &mut Checkpoint,
+    counters: &ProgressCounters,
     row_index: u64,
     state: RowState,
     writer: &SuccessShardWriter,
 ) -> Result<()> {
     bitmaps.set_state(row_index, state)?;
     bitmaps.flush_row(row_index, state)?;
+    counters.increment(state);
     checkpoint.current_row_index = row_index + 1;
     checkpoint.current_success_shard_id = writer.shard_id();
     checkpoint.current_success_records = writer.records_in_shard();
@@ -352,15 +417,22 @@ fn load_or_init_checkpoint(
         current_row_index: 0,
         current_success_shard_id: 1,
         current_success_records: 0,
+        ntfy_topic: None,
     })
 }
 
 fn save_checkpoint(path: &Path, checkpoint: &Checkpoint) -> Result<()> {
     let tmp_path = path.with_extension("json.tmp");
     let bytes = serde_json::to_vec_pretty(checkpoint).context("failed serializing checkpoint")?;
-    fs::write(&tmp_path, bytes).with_context(|| format!("failed writing {}", tmp_path.display()))?;
-    fs::rename(&tmp_path, path)
-        .with_context(|| format!("failed renaming {} to {}", tmp_path.display(), path.display()))?;
+    fs::write(&tmp_path, bytes)
+        .with_context(|| format!("failed writing {}", tmp_path.display()))?;
+    fs::rename(&tmp_path, path).with_context(|| {
+        format!(
+            "failed renaming {} to {}",
+            tmp_path.display(),
+            path.display()
+        )
+    })?;
     Ok(())
 }
 
@@ -438,6 +510,15 @@ impl StateBitmaps {
         self.invalid.flush_all()?;
         self.failed.flush_all()?;
         Ok(())
+    }
+
+    fn snapshot_counts(&self) -> Result<ProgressSnapshot> {
+        Ok(ProgressSnapshot {
+            success: self.success.count_ones()?,
+            miss: self.miss.count_ones()?,
+            invalid: self.invalid.count_ones()?,
+            failed: self.failed.count_ones()?,
+        })
     }
 }
 
@@ -523,6 +604,10 @@ impl MappedBitmap {
     fn flush_all(&self) -> Result<()> {
         self.map.flush().context("failed flushing bitmap")
     }
+
+    fn count_ones(&self) -> Result<u64> {
+        Ok(self.map.iter().map(|byte| byte.count_ones() as u64).sum())
+    }
 }
 
 fn round_up_bits(required_bits: u64) -> u64 {
@@ -554,6 +639,19 @@ struct Checkpoint {
     current_row_index: u64,
     current_success_shard_id: u64,
     current_success_records: u64,
+    #[serde(default)]
+    ntfy_topic: Option<String>,
+}
+
+impl Checkpoint {
+    fn ensure_ntfy_topic(&mut self) -> String {
+        if let Some(topic) = &self.ntfy_topic {
+            return topic.clone();
+        }
+        let topic = Uuid::new_v4().to_string();
+        self.ntfy_topic = Some(topic.clone());
+        topic
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -567,13 +665,7 @@ struct SuccessRecord {
 }
 
 impl SuccessRecord {
-    fn new(
-        row_index: u64,
-        cid: i64,
-        inchi: &str,
-        inchikey: &str,
-        raw_body: &str,
-    ) -> Result<Self> {
+    fn new(row_index: u64, cid: i64, inchi: &str, inchikey: &str, raw_body: &str) -> Result<Self> {
         let classyfire = serde_json::from_str::<Box<RawValue>>(raw_body)
             .context("failed parsing successful ClassyFire body as raw JSON")?;
         Ok(Self {
@@ -623,7 +715,9 @@ impl SuccessShardWriter {
         self.encoder
             .write_all(b"\n")
             .context("failed writing success record newline")?;
-        self.encoder.flush().context("failed flushing success shard")?;
+        self.encoder
+            .flush()
+            .context("failed flushing success shard")?;
         self.records_in_shard += 1;
         Ok(rotated)
     }
@@ -675,11 +769,8 @@ fn open_success_encoder(
         .metadata()
         .with_context(|| format!("failed to stat {}", path.display()))?
         .len();
-    zstd::stream::write::Encoder::new(
-        CountingWriter::new(BufWriter::new(file), existing_bytes),
-        3,
-    )
-    .with_context(|| format!("failed creating zstd encoder for {}", path.display()))
+    zstd::stream::write::Encoder::new(CountingWriter::new(BufWriter::new(file), existing_bytes), 3)
+        .with_context(|| format!("failed creating zstd encoder for {}", path.display()))
 }
 
 fn finish_success_encoder(
@@ -732,6 +823,114 @@ fn is_valid_inchikey(value: &str) -> bool {
             .iter()
             .enumerate()
             .all(|(index, byte)| matches!(index, 14 | 25) || byte.is_ascii_uppercase())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProgressSnapshot {
+    success: u64,
+    miss: u64,
+    invalid: u64,
+    failed: u64,
+}
+
+impl ProgressSnapshot {
+    fn completed(self) -> u64 {
+        self.success + self.miss + self.invalid
+    }
+}
+
+struct ProgressCounters {
+    success: AtomicU64,
+    miss: AtomicU64,
+    invalid: AtomicU64,
+    failed: AtomicU64,
+}
+
+impl ProgressCounters {
+    fn from_snapshot(snapshot: ProgressSnapshot) -> Self {
+        Self {
+            success: AtomicU64::new(snapshot.success),
+            miss: AtomicU64::new(snapshot.miss),
+            invalid: AtomicU64::new(snapshot.invalid),
+            failed: AtomicU64::new(snapshot.failed),
+        }
+    }
+
+    fn increment(&self, state: RowState) {
+        match state {
+            RowState::Success => {
+                self.success.fetch_add(1, Ordering::SeqCst);
+            }
+            RowState::Miss => {
+                self.miss.fetch_add(1, Ordering::SeqCst);
+            }
+            RowState::InvalidInput => {
+                self.invalid.fetch_add(1, Ordering::SeqCst);
+            }
+            RowState::Failed => {
+                self.failed.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn snapshot(&self) -> ProgressSnapshot {
+        ProgressSnapshot {
+            success: self.success.load(Ordering::SeqCst),
+            miss: self.miss.load(Ordering::SeqCst),
+            invalid: self.invalid.load(Ordering::SeqCst),
+            failed: self.failed.load(Ordering::SeqCst),
+        }
+    }
+}
+
+struct NtfyClient {
+    base_url: String,
+    topic: String,
+    client: Client,
+}
+
+impl NtfyClient {
+    fn new(base_url: &str, topic: String, user_agent: &str, timeout_seconds: u64) -> Result<Self> {
+        Ok(Self {
+            base_url: base_url.trim_end_matches('/').to_owned(),
+            topic,
+            client: Client::builder()
+                .user_agent(user_agent)
+                .timeout(Duration::from_secs(timeout_seconds.max(1)))
+                .build()
+                .context("failed building ntfy client")?,
+        })
+    }
+
+    fn subscription_url(&self) -> String {
+        format!("{}/{}", self.base_url, self.topic)
+    }
+
+    fn publish_daily_status(&self, snapshot: ProgressSnapshot) -> Result<()> {
+        let response = self
+            .client
+            .post(self.subscription_url())
+            .header(
+                "Title",
+                format!("ClassyFire daily status {}", Utc::now().format("%Y-%m-%d")),
+            )
+            .body(format!(
+                "completed: {}\nfailed: {}\nsuccess: {}\nmiss: {}\ninvalid_input: {}",
+                snapshot.completed(),
+                snapshot.failed,
+                snapshot.success,
+                snapshot.miss,
+                snapshot.invalid
+            ))
+            .send()
+            .context("failed POST ntfy daily status")?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().unwrap_or_default();
+            bail!("ntfy publish failed with status {status}: {body}");
+        }
+        Ok(())
+    }
 }
 
 struct GetRateLimiter {
@@ -802,15 +1001,46 @@ impl GetRateLimiter {
 }
 
 fn sleep_until_stop(running: &Arc<AtomicBool>, seconds: u64) -> bool {
-    let mut remaining = seconds;
-    while remaining > 0 {
+    sleep_until_stop_with_granularity(
+        running,
+        Duration::from_secs(seconds),
+        Duration::from_secs(1),
+    )
+}
+
+fn sleep_until_stop_with_granularity(
+    running: &Arc<AtomicBool>,
+    duration: Duration,
+    granularity: Duration,
+) -> bool {
+    let mut remaining = duration;
+    while remaining > Duration::ZERO {
         if !running.load(Ordering::SeqCst) {
             return false;
         }
-        sleep(Duration::from_secs(1));
-        remaining -= 1;
+        let step = remaining.min(granularity.max(Duration::from_millis(1)));
+        sleep(step);
+        remaining = remaining.saturating_sub(step);
     }
     running.load(Ordering::SeqCst)
+}
+
+fn next_ntfy_publish_after(now: DateTime<Utc>) -> DateTime<Utc> {
+    let today = now.date_naive();
+    let publish_today =
+        Utc.from_utc_datetime(&today.and_hms_opt(18, 0, 0).expect("valid 18:00 utc time"));
+    if now < publish_today {
+        publish_today
+    } else {
+        let tomorrow = today
+            .checked_add_days(Days::new(1))
+            .expect("valid next day for ntfy publish");
+        Utc.from_utc_datetime(
+            &tomorrow
+                .and_hms_opt(18, 0, 0)
+                .expect("valid 18:00 utc time"),
+        )
+    }
 }
 
 #[inline]
@@ -858,6 +1088,7 @@ mod tests {
             status_interval_seconds: 1,
             success_shard_max_records: 100,
             success_shard_max_bytes: u64::MAX,
+            ntfy_base_url: "https://ntfy.test".to_owned(),
         }
     }
 
@@ -989,6 +1220,12 @@ mod tests {
             Arc::new(AtomicBool::new(true)),
             test_limiter(),
             Arc::new(Ui::new()),
+            Arc::new(ProgressCounters::from_snapshot(ProgressSnapshot {
+                success: 0,
+                miss: 0,
+                invalid: 0,
+                failed: 0,
+            })),
             config,
         )
         .unwrap();
@@ -1013,8 +1250,11 @@ mod tests {
         assert_eq!(checkpoint.current_success_shard_id, 1);
         assert_eq!(checkpoint.current_success_records, 1);
 
-        let records =
-            read_success_records(&output_dir.join(SUCCESS_DIR_NAME).join("success-000001.jsonl.zst"));
+        let records = read_success_records(
+            &output_dir
+                .join(SUCCESS_DIR_NAME)
+                .join("success-000001.jsonl.zst"),
+        );
         assert_eq!(records.len(), 1);
         assert_eq!(records[0]["row_index"], 0);
         assert_eq!(records[0]["cid"], 1);
@@ -1042,7 +1282,8 @@ mod tests {
         bitmaps.set_state(0, RowState::Success).unwrap();
         bitmaps.flush_all().unwrap();
 
-        let mut writer = SuccessShardWriter::open(success_dir(&output_dir), 1, 0, 100, u64::MAX).unwrap();
+        let mut writer =
+            SuccessShardWriter::open(success_dir(&output_dir), 1, 0, 100, u64::MAX).unwrap();
         writer
             .write_record(
                 &SuccessRecord::new(
@@ -1067,6 +1308,7 @@ mod tests {
                 current_row_index: 1,
                 current_success_shard_id: 1,
                 current_success_records: 1,
+                ntfy_topic: Some("topic".to_owned()),
             },
         )
         .unwrap();
@@ -1081,6 +1323,12 @@ mod tests {
             Arc::new(AtomicBool::new(true)),
             test_limiter(),
             Arc::new(Ui::new()),
+            Arc::new(ProgressCounters::from_snapshot(ProgressSnapshot {
+                success: 1,
+                miss: 0,
+                invalid: 0,
+                failed: 0,
+            })),
             config,
         )
         .unwrap();
@@ -1095,8 +1343,11 @@ mod tests {
         assert_eq!(checkpoint.current_success_shard_id, 1);
         assert_eq!(checkpoint.current_success_records, 2);
 
-        let records =
-            read_success_records(&output_dir.join(SUCCESS_DIR_NAME).join("success-000001.jsonl.zst"));
+        let records = read_success_records(
+            &output_dir
+                .join(SUCCESS_DIR_NAME)
+                .join("success-000001.jsonl.zst"),
+        );
         assert_eq!(records.len(), 2);
         assert_eq!(records[0]["cid"], 1);
         assert_eq!(records[1]["cid"], 2);
@@ -1110,8 +1361,12 @@ mod tests {
         let output_dir = dir.path().join("run");
         fs::write(&input_path, "").unwrap();
 
-        run_streaming(test_config(input_path, output_dir.clone(), "http://127.0.0.1:9".to_owned()))
-            .unwrap();
+        run_streaming(test_config(
+            input_path,
+            output_dir.clone(),
+            "http://127.0.0.1:9".to_owned(),
+        ))
+        .unwrap();
 
         let checkpoint = load_checkpoint(&output_dir.join(CHECKPOINT_NAME));
         assert_eq!(checkpoint.current_row_index, 0);
@@ -1122,7 +1377,11 @@ mod tests {
     fn checkpoint_rejects_path_mismatch() {
         let dir = tempdir().unwrap();
         let input_path = dir.path().join("input.tsv");
-        fs::write(&input_path, "1\tInChI=1S/CH4/h1H4\tVNWKTOKETHGBQD-UHFFFAOYSA-N\n").unwrap();
+        fs::write(
+            &input_path,
+            "1\tInChI=1S/CH4/h1H4\tVNWKTOKETHGBQD-UHFFFAOYSA-N\n",
+        )
+        .unwrap();
         let checkpoint_path = dir.path().join(CHECKPOINT_NAME);
         let input_meta = read_input_metadata(&input_path).unwrap();
 
@@ -1135,6 +1394,7 @@ mod tests {
                 current_row_index: 0,
                 current_success_shard_id: 1,
                 current_success_records: 0,
+                ntfy_topic: Some("topic".to_owned()),
             },
         )
         .unwrap();
@@ -1149,7 +1409,11 @@ mod tests {
     fn checkpoint_rejects_size_and_mtime_mismatch() {
         let dir = tempdir().unwrap();
         let input_path = dir.path().join("input.tsv");
-        fs::write(&input_path, "1\tInChI=1S/CH4/h1H4\tVNWKTOKETHGBQD-UHFFFAOYSA-N\n").unwrap();
+        fs::write(
+            &input_path,
+            "1\tInChI=1S/CH4/h1H4\tVNWKTOKETHGBQD-UHFFFAOYSA-N\n",
+        )
+        .unwrap();
         let checkpoint_path = dir.path().join(CHECKPOINT_NAME);
         let input_meta = read_input_metadata(&input_path).unwrap();
 
@@ -1162,6 +1426,7 @@ mod tests {
                 current_row_index: 0,
                 current_success_shard_id: 1,
                 current_success_records: 0,
+                ntfy_topic: Some("topic".to_owned()),
             },
         )
         .unwrap();
@@ -1179,6 +1444,7 @@ mod tests {
                 current_row_index: 0,
                 current_success_shard_id: 1,
                 current_success_records: 0,
+                ntfy_topic: Some("topic".to_owned()),
             },
         )
         .unwrap();
@@ -1218,6 +1484,11 @@ mod tests {
     fn sleep_and_backoff_helpers_cover_stop_and_other_reason() {
         let running = Arc::new(AtomicBool::new(false));
         assert!(!sleep_until_stop(&running, 1));
+        assert!(!sleep_until_stop_with_granularity(
+            &running,
+            Duration::from_millis(10),
+            Duration::from_millis(1),
+        ));
 
         let limiter = GetRateLimiter {
             interval: Duration::from_secs(1),
@@ -1227,5 +1498,77 @@ mod tests {
         assert!(limiter.seconds_until_ready() >= 1);
         assert!(!is_throttled_or_html("plain transport error"));
         assert_eq!(classify_backoff_reason("plain transport error"), "error");
+    }
+
+    #[test]
+    fn next_ntfy_publish_uses_same_day_or_next_day_18_utc() {
+        let same_day = next_ntfy_publish_after(
+            Utc.with_ymd_and_hms(2026, 3, 26, 12, 0, 0)
+                .single()
+                .unwrap(),
+        );
+        assert_eq!(
+            same_day,
+            Utc.with_ymd_and_hms(2026, 3, 26, 18, 0, 0)
+                .single()
+                .unwrap()
+        );
+
+        let next_day = next_ntfy_publish_after(
+            Utc.with_ymd_and_hms(2026, 3, 26, 18, 30, 0)
+                .single()
+                .unwrap(),
+        );
+        assert_eq!(
+            next_day,
+            Utc.with_ymd_and_hms(2026, 3, 27, 18, 0, 0)
+                .single()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn checkpoint_generates_and_reuses_ntfy_topic() {
+        let mut checkpoint = Checkpoint {
+            input_path: "input.tsv".to_owned(),
+            input_size_bytes: 1,
+            input_mtime_epoch: 1,
+            current_row_index: 0,
+            current_success_shard_id: 1,
+            current_success_records: 0,
+            ntfy_topic: None,
+        };
+        let first = checkpoint.ensure_ntfy_topic();
+        assert_eq!(Uuid::parse_str(&first).unwrap().get_version_num(), 4);
+        let second = checkpoint.ensure_ntfy_topic();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn ntfy_client_publishes_daily_status_to_topic() {
+        let server = MockServer::new([("/topic-123", MockResponse::text(200, "ok"))]);
+        let client = NtfyClient::new(
+            &server.url(),
+            "topic-123".to_owned(),
+            "classyfire-test/0.1",
+            1,
+        )
+        .unwrap();
+
+        client
+            .publish_daily_status(ProgressSnapshot {
+                success: 10,
+                miss: 5,
+                invalid: 2,
+                failed: 3,
+            })
+            .unwrap();
+
+        let requests = server.seen_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/topic-123");
+        assert!(requests[0].headers.contains_key("title"));
+        assert!(requests[0].body.contains("completed: 17"));
+        assert!(requests[0].body.contains("failed: 3"));
     }
 }

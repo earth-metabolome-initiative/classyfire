@@ -314,10 +314,7 @@ fn write_styled_line(stderr: &mut io::Stderr, line: &str, width: usize) -> Resul
 }
 
 fn is_section_header(line: &str) -> bool {
-    matches!(
-        line,
-        "recent events:" | "recent errors:"
-    )
+    matches!(line, "recent events:" | "recent errors:")
 }
 
 fn is_error_event(line: &str) -> bool {

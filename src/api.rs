@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use reqwest::blocking::Client;
-use serde::Deserialize;
 use serde::de::IgnoredAny;
+use serde::Deserialize;
 
 const HTML_MARKERS: [&str; 4] = ["<!doctype html", "<html", "<head", "unsupported browser"];
 
@@ -64,8 +64,8 @@ pub fn validate_entity_body(body: &HttpBody) -> Result<bool> {
         return Ok(false);
     }
 
-    let probe: ClassificationProbe = serde_json::from_str(&body.body)
-        .context("failed to parse entity response JSON")?;
+    let probe: ClassificationProbe =
+        serde_json::from_str(&body.body).context("failed to parse entity response JSON")?;
     Ok(probe.has_classification())
 }
 
@@ -281,7 +281,8 @@ mod tests {
 
     #[test]
     fn html_summary_falls_back_to_snippet_without_title() {
-        let summary = summarize_html_body("<html><body>gateway timeout from upstream</body></html>");
+        let summary =
+            summarize_html_body("<html><body>gateway timeout from upstream</body></html>");
         assert!(summary.starts_with("snippet:"));
     }
 

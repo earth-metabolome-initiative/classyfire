@@ -77,6 +77,7 @@ run/
 Notes:
 
 - `checkpoint.json` stores the current scan position and current output shard metadata.
+- `checkpoint.json` also keeps the ntfy topic so restarts reuse the same status URL.
 - The four `*.bits` files are `mmap`ed bitmaps indexed by input row number.
 - The `success/` directory contains the canonical artifact shards.
 

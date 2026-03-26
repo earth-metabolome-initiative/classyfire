@@ -11,6 +11,7 @@ pub const DEFAULT_THROTTLE_BACKOFF_SECONDS: u64 = 300;
 pub const DEFAULT_STATUS_INTERVAL_SECONDS: u64 = 1;
 pub const DEFAULT_SUCCESS_SHARD_MAX_RECORDS: u64 = 100_000;
 pub const DEFAULT_SUCCESS_SHARD_MAX_BYTES: u64 = 128 * 1024 * 1024;
+pub const DEFAULT_NTFY_BASE_URL: &str = "https://ntfy.sh";
 
 #[derive(Debug, Parser)]
 #[command(name = "classyfire-crawler")]
@@ -49,6 +50,7 @@ pub struct StreamConfig {
     pub status_interval_seconds: u64,
     pub success_shard_max_records: u64,
     pub success_shard_max_bytes: u64,
+    pub ntfy_base_url: String,
 }
 
 impl StreamConfig {
@@ -70,6 +72,7 @@ impl StreamConfig {
             ),
             success_shard_max_records: args.success_shard_max_records,
             success_shard_max_bytes: args.success_shard_max_bytes,
+            ntfy_base_url: env_string("CLASSYFIRE_NTFY_BASE_URL", DEFAULT_NTFY_BASE_URL),
         }
     }
 
@@ -153,18 +156,21 @@ mod tests {
             Commands::Run(args) => {
                 assert_eq!(args.input, PathBuf::from("input.tsv.zst"));
                 assert_eq!(args.output_dir, PathBuf::from("run-dir"));
-                assert_eq!(args.success_shard_max_records, DEFAULT_SUCCESS_SHARD_MAX_RECORDS);
-                assert_eq!(args.success_shard_max_bytes, DEFAULT_SUCCESS_SHARD_MAX_BYTES);
+                assert_eq!(
+                    args.success_shard_max_records,
+                    DEFAULT_SUCCESS_SHARD_MAX_RECORDS
+                );
+                assert_eq!(
+                    args.success_shard_max_bytes,
+                    DEFAULT_SUCCESS_SHARD_MAX_BYTES
+                );
             }
         }
     }
 
     #[test]
     fn stream_config_uses_environment_overrides() {
-        let _lock = ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap();
+        let _lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let _env = EnvGuard::set(&[
             ("CLASSYFIRE_BASE_URL", "http://127.0.0.1:9999"),
             ("CLASSYFIRE_USER_AGENT", "classyfire-test/0.1"),
@@ -172,6 +178,7 @@ mod tests {
             ("CLASSYFIRE_GET_SLEEP_SECONDS", "7"),
             ("CLASSYFIRE_THROTTLE_BACKOFF_SECONDS", "11"),
             ("CLASSYFIRE_STATUS_INTERVAL_SECONDS", "13"),
+            ("CLASSYFIRE_NTFY_BASE_URL", "https://ntfy.example"),
         ]);
 
         let config = StreamConfig::from_env(StreamArgs {
@@ -189,6 +196,7 @@ mod tests {
         assert_eq!(config.status_interval_seconds, 13);
         assert_eq!(config.success_shard_max_records, 42);
         assert_eq!(config.success_shard_max_bytes, 99);
+        assert_eq!(config.ntfy_base_url, "https://ntfy.example");
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -39,9 +39,16 @@ impl MockResponse {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct SeenRequest {
+    pub path: String,
+    pub headers: HashMap<String, String>,
+    pub body: String,
+}
+
 pub struct MockServer {
     address: SocketAddr,
-    seen_paths: Arc<Mutex<Vec<String>>>,
+    seen_requests: Arc<Mutex<Vec<SeenRequest>>>,
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
@@ -59,11 +66,11 @@ impl MockServer {
                 .map(|(path, response)| (path.into(), response))
                 .collect::<HashMap<_, _>>(),
         );
-        let seen_paths = Arc::new(Mutex::new(Vec::new()));
+        let seen_requests = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
 
         let thread_routes = Arc::clone(&routes);
-        let thread_seen_paths = Arc::clone(&seen_paths);
+        let thread_seen_requests = Arc::clone(&seen_requests);
         let thread_stop = Arc::clone(&stop);
         let handle = thread::spawn(move || loop {
             if thread_stop.load(Ordering::SeqCst) {
@@ -71,7 +78,7 @@ impl MockServer {
             }
             match listener.accept() {
                 Ok((stream, _)) => {
-                    handle_connection(stream, &thread_routes, &thread_seen_paths)
+                    handle_connection(stream, &thread_routes, &thread_seen_requests)
                         .expect("mock server connection handling failed");
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -83,7 +90,7 @@ impl MockServer {
 
         Self {
             address,
-            seen_paths,
+            seen_requests,
             stop,
             handle: Some(handle),
         }
@@ -94,9 +101,16 @@ impl MockServer {
     }
 
     pub fn seen_paths(&self) -> Vec<String> {
-        self.seen_paths
+        self.seen_requests()
+            .into_iter()
+            .map(|request| request.path)
+            .collect()
+    }
+
+    pub fn seen_requests(&self) -> Vec<SeenRequest> {
+        self.seen_requests
             .lock()
-            .expect("mock server seen_paths mutex poisoned")
+            .expect("mock server seen_requests mutex poisoned")
             .clone()
     }
 }
@@ -114,7 +128,7 @@ impl Drop for MockServer {
 fn handle_connection(
     stream: TcpStream,
     routes: &HashMap<String, MockResponse>,
-    seen_paths: &Mutex<Vec<String>>,
+    seen_requests: &Mutex<Vec<SeenRequest>>,
 ) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(1)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -128,17 +142,34 @@ fn handle_connection(
         .nth(1)
         .unwrap_or("/")
         .to_owned();
+    let mut headers = HashMap::new();
     loop {
         let mut header_line = String::new();
         if reader.read_line(&mut header_line)? == 0 || header_line == "\r\n" {
             break;
         }
+        if let Some((name, value)) = header_line.split_once(':') {
+            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_owned());
+        }
     }
 
-    seen_paths
+    let content_length = headers
+        .get("content-length")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let mut body = vec![0_u8; content_length];
+    if content_length > 0 {
+        reader.read_exact(&mut body)?;
+    }
+
+    seen_requests
         .lock()
-        .expect("mock server seen_paths mutex poisoned")
-        .push(path.clone());
+        .expect("mock server seen_requests mutex poisoned")
+        .push(SeenRequest {
+            path: path.clone(),
+            headers,
+            body: String::from_utf8_lossy(&body).into_owned(),
+        });
 
     let response = routes
         .get(&path)

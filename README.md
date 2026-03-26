@@ -22,6 +22,8 @@ The code deliberately sticks to the `GET /entities/{InChIKey}.json` path because
 - writes successful results directly into rotating `JSONL.zst` shards
 - tracks terminal row states in `mmap`ed bitmap files
 - resumes from a small checkpoint file
+- prints a per-run ntfy subscription URL with a UUID topic
+- publishes a daily ntfy status update at `18:00 UTC`
 - shows a small live TUI with the current key, recent results, and recent errors
 
 The crawler is row-oriented:
@@ -57,6 +59,9 @@ The output directory will contain:
     ...
 ```
 
+On startup, the runner prints an ntfy URL such as `https://ntfy.sh/<uuid-v4-topic>`.
+That topic receives one daily status message at `18:00 UTC` with the current `completed` and `failed` counts.
+
 ## CLI View
 
 The downloader ships with a small live terminal dashboard so you can see the current key, last result, and recent errors while the crawl is running.
@@ -70,6 +75,7 @@ Runtime defaults are in `src/config.rs`:
 - request timeout: `30s`
 - status refresh: `1s`
 - success shard rotation: `100,000` records or `128 MiB`
+- ntfy base URL: `https://ntfy.sh`
 
 All operational defaults can be overridden with `CLASSYFIRE_*` environment variables. The binary loads them from `.env` automatically at startup.
 
