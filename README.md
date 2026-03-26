@@ -24,7 +24,8 @@ The code deliberately sticks to the `GET /entities/{InChIKey}.json` path because
 - resumes from a small checkpoint file
 - prints a per-run ntfy subscription URL with a UUID topic
 - publishes a daily ntfy status update at `18:00 UTC`
-- can send an ntfy message when a Zenodo release completes
+- publishes a merged Zenodo snapshot periodically from sealed success shards
+- sends an ntfy message after each Zenodo publish attempt
 - shows a small live TUI with the current key, recent results, and recent errors
 
 The crawler is row-oriented:
@@ -37,12 +38,12 @@ There is no SQLite database, no rebuild step, and no export step after the crawl
 
 ## Fetch Input
 
-The current PubChem source file lives under the official `Compound/Extras` directory as `CID-InChI-Key.gz`. To download it and convert it into the `.zst` form used by the examples below:
+The current PubChem source file lives under the official `Compound/Extras` directory as `CID-InChI-Key.gz`. The crawler can read plain TSV or `.zst`. It does not read `.gz` directly, so the simplest setup is to decompress once to plain TSV:
 
 ```bash
 curl -L -o CID-InChI-Key.gz \
   https://ftp.ncbi.nlm.nih.gov/pubchem/Compound/Extras/CID-InChI-Key.gz
-gzip -cd CID-InChI-Key.gz | zstd -T0 -19 -o CID-InChI-Key.zst
+gzip -cd CID-InChI-Key.gz > CID-InChI-Key.tsv
 ```
 
 ## Main Command
@@ -51,19 +52,20 @@ Run the downloader:
 
 ```bash
 cargo run --release -- run \
-  --input /data/pubchem/CID-InChI-Key.zst \
-  --output-dir /data/classyfire-run
+  --input ./CID-InChI-Key.tsv \
+  --output-dir ./classyfire-run
 ```
 
 The output directory will contain:
 
 ```text
-/data/classyfire-run/
+./classyfire-run/
   checkpoint.json
   state.success.bits
   state.miss.bits
   state.invalid.bits
   state.failed.bits
+  releases/
   success/
     success-000001.jsonl.zst
     success-000002.jsonl.zst
@@ -73,11 +75,20 @@ The output directory will contain:
 On startup, the runner prints an ntfy URL such as `https://ntfy.sh/<uuid-v4-topic>`.
 That topic receives one daily status message at `18:00 UTC` with the current `completed` and `failed` counts.
 
-If an external Zenodo upload step finishes, it can reuse the same topic:
+The `run` command also requires Zenodo credentials at startup. It builds a merged `classyfire-labels.jsonl.zst` snapshot from the sealed success shards every `CLASSYFIRE_ZENODO_PUBLISH_INTERVAL_SECONDS` seconds, uploads that snapshot plus a `manifest.json` as a new Zenodo version, and posts the result to the same ntfy topic.
+
+Required environment variables:
+
+- `ZENODO_TOKEN`
+- `CLASSYFIRE_ZENODO_DEPOSIT_ID`
+
+The default publish interval is one week (`604800` seconds).
+
+If you need to send a manual ntfy message for an already-completed release, the helper command still exists:
 
 ```bash
 cargo run --release -- notify-zenodo-release \
-  --output-dir /data/classyfire-run \
+  --output-dir ./classyfire-run \
   --record-url https://zenodo.org/records/12345678
 ```
 
@@ -93,8 +104,9 @@ Runtime defaults are in `src/config.rs`:
 - status refresh: `1s`
 - success shard rotation: `100,000` records or `128 MiB`
 - ntfy base URL: `https://ntfy.sh`
+- Zenodo publish interval: `604800s` (`7d`)
 
-All operational defaults can be overridden with `CLASSYFIRE_*` environment variables. The binary loads them from `.env` automatically at startup.
+Operational settings come from `CLASSYFIRE_*` environment variables plus the required `ZENODO_TOKEN`. The binary loads them from `.env` automatically at startup.
 
 Start by copying the checked-in example:
 

@@ -1,6 +1,7 @@
 use crate::api::{validate_entity_body, ApiClient};
-use crate::config::{NotifyZenodoReleaseConfig, StreamConfig};
+use crate::config::{NotifyZenodoReleaseConfig, StreamConfig, ZenodoConfig};
 use crate::ui::Ui;
+use crate::zenodo::{publish as publish_zenodo_release, PublishStats};
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Days, TimeZone, Utc};
 use memmap2::{MmapMut, MmapOptions};
@@ -22,6 +23,9 @@ const MISS_BITMAP_NAME: &str = "state.miss.bits";
 const INVALID_BITMAP_NAME: &str = "state.invalid.bits";
 const FAILED_BITMAP_NAME: &str = "state.failed.bits";
 const CHECKPOINT_NAME: &str = "checkpoint.json";
+const RELEASE_DATASET_FILENAME: &str = "classyfire-labels.jsonl.zst";
+const RELEASE_DIR_NAME: &str = "releases";
+const RELEASE_MANIFEST_FILENAME: &str = "manifest.json";
 const SUCCESS_DIR_NAME: &str = "success";
 
 pub fn run_streaming(config: StreamConfig) -> Result<()> {
@@ -66,8 +70,11 @@ pub fn run_streaming(config: StreamConfig) -> Result<()> {
         let get_limiter = Arc::clone(&get_limiter);
         let ui = Arc::clone(&ui);
         let counters = Arc::clone(&counters);
+        let ntfy_client = Arc::clone(&ntfy_client);
         let config = config.clone();
-        thread::spawn(move || run_stream_worker(running, get_limiter, ui, counters, config))
+        thread::spawn(move || {
+            run_stream_worker(running, get_limiter, ui, counters, ntfy_client, config)
+        })
     };
 
     let reporter_handle = if ui.is_interactive() {
@@ -132,6 +139,7 @@ fn run_stream_worker(
     get_limiter: Arc<GetRateLimiter>,
     ui: Arc<Ui>,
     counters: Arc<ProgressCounters>,
+    ntfy_client: Arc<NtfyClient>,
     config: StreamConfig,
 ) -> Result<()> {
     ensure_output_dirs(&config.output_dir)?;
@@ -153,6 +161,8 @@ fn run_stream_worker(
         config.success_shard_max_bytes,
     )?;
     save_checkpoint(&checkpoint_path, &checkpoint)?;
+    let zenodo_config = config.zenodo_config();
+    let mut last_publish = Instant::now();
 
     let client = ApiClient::new(&config.base_url, &config.user_agent, config.timeout_seconds)?;
     let mut reader = open_input_reader(&config.input)?;
@@ -162,6 +172,22 @@ fn run_stream_worker(
     loop {
         if !running.load(Ordering::SeqCst) {
             break;
+        }
+
+        if last_publish.elapsed() >= Duration::from_secs(zenodo_config.publish_interval_seconds) {
+            publish_current_snapshot_to_zenodo(
+                &mut writer,
+                PublishContext {
+                    checkpoint_path: &checkpoint_path,
+                    checkpoint: &mut checkpoint,
+                    counters: &counters,
+                    output_dir: &config.output_dir,
+                    zenodo_config: &zenodo_config,
+                    ntfy_client: &ntfy_client,
+                    ui: &ui,
+                },
+            )?;
+            last_publish = Instant::now();
         }
 
         line.clear();
@@ -343,14 +369,99 @@ fn persist_terminal_state(
     save_checkpoint(checkpoint_path, checkpoint)
 }
 
+struct PublishContext<'a> {
+    checkpoint_path: &'a Path,
+    checkpoint: &'a mut Checkpoint,
+    counters: &'a ProgressCounters,
+    output_dir: &'a Path,
+    zenodo_config: &'a ZenodoConfig,
+    ntfy_client: &'a NtfyClient,
+    ui: &'a Ui,
+}
+
+fn publish_current_snapshot_to_zenodo(
+    writer: &mut SuccessShardWriter,
+    ctx: PublishContext<'_>,
+) -> Result<()> {
+    let snapshot = ctx.counters.snapshot();
+    if snapshot.success == 0 {
+        ctx.ui
+            .info("skipping Zenodo publish: no successful rows yet");
+        return Ok(());
+    }
+
+    let sealed_current = writer.seal_current()?;
+    ctx.checkpoint.current_success_shard_id = writer.shard_id();
+    ctx.checkpoint.current_success_records = writer.records_in_shard();
+    save_checkpoint(ctx.checkpoint_path, ctx.checkpoint)?;
+
+    let Some(release) = build_release_artifacts(ctx.output_dir, snapshot)? else {
+        if sealed_current {
+            ctx.ui
+                .info("skipping Zenodo publish: no non-empty success shards found");
+        }
+        return Ok(());
+    };
+
+    let publish_result = publish_zenodo_release(
+        &ctx.zenodo_config.token,
+        &ctx.zenodo_config.deposit_id,
+        &release.output_path,
+        &release.manifest_path,
+        PublishStats {
+            success: snapshot.success,
+            miss: snapshot.miss,
+            invalid: snapshot.invalid,
+            failed: snapshot.failed,
+        },
+    );
+
+    match publish_result {
+        Ok(published) => {
+            ctx.ui
+                .info(format!("published Zenodo release {}", published.record_url));
+            if let Err(error) = ctx
+                .ntfy_client
+                .publish_zenodo_release_completed_with_counts(&published.record_url, snapshot)
+            {
+                ctx.ui
+                    .info(format!("ntfy release notification failed: {error:#}"));
+            }
+            fs::remove_file(&release.output_path)
+                .with_context(|| format!("failed removing {}", release.output_path.display()))?;
+            fs::remove_file(&release.manifest_path)
+                .with_context(|| format!("failed removing {}", release.manifest_path.display()))?;
+        }
+        Err(error) => {
+            ctx.ui.info(format!("Zenodo publish failed: {error:#}"));
+            if let Err(ntfy_error) = ctx
+                .ntfy_client
+                .publish_zenodo_release_failed(&error.to_string())
+            {
+                ctx.ui.info(format!(
+                    "ntfy release failure notification failed: {ntfy_error:#}"
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn ensure_output_dirs(output_dir: &Path) -> Result<()> {
     fs::create_dir_all(success_dir(output_dir))
         .with_context(|| format!("failed creating {}", success_dir(output_dir).display()))?;
+    fs::create_dir_all(release_dir(output_dir))
+        .with_context(|| format!("failed creating {}", release_dir(output_dir).display()))?;
     Ok(())
 }
 
 fn success_dir(output_dir: &Path) -> PathBuf {
     output_dir.join(SUCCESS_DIR_NAME)
+}
+
+fn release_dir(output_dir: &Path) -> PathBuf {
+    output_dir.join(RELEASE_DIR_NAME)
 }
 
 fn read_input_metadata(path: &Path) -> Result<InputMetadata> {
@@ -758,7 +869,27 @@ impl SuccessShardWriter {
         Ok(true)
     }
 
+    fn seal_current(&mut self) -> Result<bool> {
+        if self.records_in_shard == 0 && self.compressed_bytes() == 0 {
+            return Ok(false);
+        }
+        let next_shard_id = self.shard_id + 1;
+        let next_encoder =
+            open_success_encoder(&success_shard_path(&self.output_dir, next_shard_id))?;
+        let previous_encoder = std::mem::replace(&mut self.encoder, next_encoder);
+        finish_success_encoder(previous_encoder)?;
+        self.shard_id = next_shard_id;
+        self.records_in_shard = 0;
+        Ok(true)
+    }
+
     fn finish(self) -> Result<()> {
+        if self.records_in_shard == 0 && self.compressed_bytes() == 0 {
+            drop(self.encoder);
+            let path = success_shard_path(&self.output_dir, self.shard_id);
+            remove_zero_length_file(&path)?;
+            return Ok(());
+        }
         finish_success_encoder(self.encoder)
     }
 
@@ -777,6 +908,93 @@ impl SuccessShardWriter {
 
 fn success_shard_path(output_dir: &Path, shard_id: u64) -> PathBuf {
     output_dir.join(format!("success-{shard_id:06}.jsonl.zst"))
+}
+
+struct ReleaseArtifacts {
+    output_path: PathBuf,
+    manifest_path: PathBuf,
+}
+
+fn build_release_artifacts(
+    output_dir: &Path,
+    snapshot: ProgressSnapshot,
+) -> Result<Option<ReleaseArtifacts>> {
+    let mut shards = fs::read_dir(success_dir(output_dir))
+        .with_context(|| format!("failed reading {}", success_dir(output_dir).display()))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("zst"))
+        .filter_map(|path| match fs::metadata(&path) {
+            Ok(metadata) if metadata.len() > 0 => Some((path, metadata.len())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    shards.sort_by(|left, right| left.0.cmp(&right.0));
+
+    if shards.is_empty() {
+        return Ok(None);
+    }
+
+    let release_dir = release_dir(output_dir);
+    let output_path = release_dir.join(RELEASE_DATASET_FILENAME);
+    let manifest_path = release_dir.join(RELEASE_MANIFEST_FILENAME);
+    let output_tmp = release_dir.join(format!("{RELEASE_DATASET_FILENAME}.tmp"));
+    let manifest_tmp = release_dir.join(format!("{RELEASE_MANIFEST_FILENAME}.tmp"));
+
+    {
+        let mut output = File::create(&output_tmp)
+            .with_context(|| format!("failed creating {}", output_tmp.display()))?;
+        for (path, _) in &shards {
+            let mut shard =
+                File::open(path).with_context(|| format!("failed opening {}", path.display()))?;
+            std::io::copy(&mut shard, &mut output)
+                .with_context(|| format!("failed appending {}", path.display()))?;
+        }
+        output
+            .sync_all()
+            .with_context(|| format!("failed syncing {}", output_tmp.display()))?;
+    }
+
+    let manifest = serde_json::json!({
+        "generated_at": Utc::now().to_rfc3339(),
+        "format": "jsonl.zst",
+        "success_rows": snapshot.success,
+        "miss_rows": snapshot.miss,
+        "invalid_rows": snapshot.invalid,
+        "failed_rows": snapshot.failed,
+        "shards": shards
+            .iter()
+            .map(|(path, bytes)| serde_json::json!({
+                "filename": path.file_name().and_then(|name| name.to_str()).unwrap_or_default(),
+                "bytes": bytes,
+            }))
+            .collect::<Vec<_>>(),
+    });
+    fs::write(
+        &manifest_tmp,
+        serde_json::to_vec_pretty(&manifest).context("failed serializing release manifest")?,
+    )
+    .with_context(|| format!("failed writing {}", manifest_tmp.display()))?;
+
+    fs::rename(&output_tmp, &output_path).with_context(|| {
+        format!(
+            "failed renaming {} to {}",
+            output_tmp.display(),
+            output_path.display()
+        )
+    })?;
+    fs::rename(&manifest_tmp, &manifest_path).with_context(|| {
+        format!(
+            "failed renaming {} to {}",
+            manifest_tmp.display(),
+            manifest_path.display()
+        )
+    })?;
+
+    Ok(Some(ReleaseArtifacts {
+        output_path,
+        manifest_path,
+    }))
 }
 
 fn open_success_encoder(
@@ -808,6 +1026,18 @@ fn finish_success_encoder(
         .get_ref()
         .sync_all()
         .context("failed syncing success shard")
+}
+
+fn remove_zero_length_file(path: &Path) -> Result<()> {
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.len() == 0 => {
+            fs::remove_file(path).with_context(|| format!("failed removing {}", path.display()))?;
+            Ok(())
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("failed stating {}", path.display())),
+    }
 }
 
 struct CountingWriter<W> {
@@ -948,6 +1178,34 @@ impl NtfyClient {
             "ClassyFire Zenodo release completed",
             &format!("record_url: {}", record_url.trim()),
             "failed POST ntfy zenodo release notification",
+        )
+    }
+
+    fn publish_zenodo_release_completed_with_counts(
+        &self,
+        record_url: &str,
+        snapshot: ProgressSnapshot,
+    ) -> Result<()> {
+        self.publish_message(
+            "ClassyFire Zenodo release completed",
+            &format!(
+                "record_url: {}\ncompleted: {}\nfailed: {}\nsuccess: {}\nmiss: {}\ninvalid_input: {}",
+                record_url.trim(),
+                snapshot.completed(),
+                snapshot.failed,
+                snapshot.success,
+                snapshot.miss,
+                snapshot.invalid
+            ),
+            "failed POST ntfy zenodo release notification",
+        )
+    }
+
+    fn publish_zenodo_release_failed(&self, error: &str) -> Result<()> {
+        self.publish_message(
+            "ClassyFire Zenodo release failed",
+            &format!("error: {}", error.trim()),
+            "failed POST ntfy zenodo release failure notification",
         )
     }
 
@@ -1111,6 +1369,18 @@ mod tests {
         })
     }
 
+    fn test_ntfy_client() -> Arc<NtfyClient> {
+        Arc::new(
+            NtfyClient::new(
+                "http://127.0.0.1:9",
+                "topic".to_owned(),
+                "classyfire-test/0.1",
+                1,
+            )
+            .unwrap(),
+        )
+    }
+
     fn test_config(input: PathBuf, output_dir: PathBuf, base_url: String) -> StreamConfig {
         StreamConfig {
             input,
@@ -1124,6 +1394,9 @@ mod tests {
             success_shard_max_records: 100,
             success_shard_max_bytes: u64::MAX,
             ntfy_base_url: "https://ntfy.test".to_owned(),
+            zenodo_token: "token".to_owned(),
+            zenodo_deposit_id: "deposit".to_owned(),
+            zenodo_publish_interval_seconds: 7 * 24 * 60 * 60,
         }
     }
 
@@ -1261,6 +1534,7 @@ mod tests {
                 invalid: 0,
                 failed: 0,
             })),
+            test_ntfy_client(),
             config,
         )
         .unwrap();
@@ -1364,6 +1638,7 @@ mod tests {
                 invalid: 0,
                 failed: 0,
             })),
+            test_ntfy_client(),
             config,
         )
         .unwrap();
@@ -1387,6 +1662,68 @@ mod tests {
         assert_eq!(records[0]["cid"], 1);
         assert_eq!(records[1]["cid"], 2);
         assert_eq!(records[1]["classyfire"]["direct_parent"]["name"], "Oxides");
+    }
+
+    #[test]
+    fn build_release_artifacts_merges_non_empty_success_shards() {
+        let dir = tempdir().unwrap();
+        let output_dir = dir.path().join("run");
+        ensure_output_dirs(&output_dir).unwrap();
+
+        let mut writer =
+            SuccessShardWriter::open(success_dir(&output_dir), 1, 0, 1, u64::MAX).unwrap();
+        writer
+            .write_record(
+                &SuccessRecord::new(
+                    0,
+                    1,
+                    "InChI=1S/CH4/h1H4",
+                    "VNWKTOKETHGBQD-UHFFFAOYSA-N",
+                    r#"{"direct_parent":{"name":"Alkanes"}}"#,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        writer
+            .write_record(
+                &SuccessRecord::new(
+                    1,
+                    2,
+                    "InChI=1S/H2O/h1H2",
+                    "XLYOFNOQVPJJNP-UHFFFAOYSA-N",
+                    r#"{"direct_parent":{"name":"Oxides"}}"#,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        writer.seal_current().unwrap();
+        writer.finish().unwrap();
+
+        let release = build_release_artifacts(
+            &output_dir,
+            ProgressSnapshot {
+                success: 2,
+                miss: 3,
+                invalid: 4,
+                failed: 5,
+            },
+        )
+        .unwrap()
+        .unwrap();
+
+        let records = read_success_records(&release.output_path);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["cid"], 1);
+        assert_eq!(records[1]["cid"], 2);
+
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(&release.manifest_path).unwrap()).unwrap();
+        assert_eq!(manifest["format"], "jsonl.zst");
+        assert_eq!(manifest["success_rows"], 2);
+        assert_eq!(manifest["miss_rows"], 3);
+        assert_eq!(manifest["invalid_rows"], 4);
+        assert_eq!(manifest["failed_rows"], 5);
+        assert_eq!(manifest["shards"].as_array().unwrap().len(), 2);
     }
 
     #[test]

@@ -12,6 +12,7 @@ pub const DEFAULT_STATUS_INTERVAL_SECONDS: u64 = 1;
 pub const DEFAULT_SUCCESS_SHARD_MAX_RECORDS: u64 = 100_000;
 pub const DEFAULT_SUCCESS_SHARD_MAX_BYTES: u64 = 128 * 1024 * 1024;
 pub const DEFAULT_NTFY_BASE_URL: &str = "https://ntfy.sh";
+pub const DEFAULT_ZENODO_PUBLISH_INTERVAL_SECONDS: u64 = 7 * 24 * 60 * 60;
 
 #[derive(Debug, Parser)]
 #[command(name = "classyfire-crawler")]
@@ -60,6 +61,9 @@ pub struct StreamConfig {
     pub success_shard_max_records: u64,
     pub success_shard_max_bytes: u64,
     pub ntfy_base_url: String,
+    pub zenodo_token: String,
+    pub zenodo_deposit_id: String,
+    pub zenodo_publish_interval_seconds: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +73,13 @@ pub struct NotifyZenodoReleaseConfig {
     pub user_agent: String,
     pub timeout_seconds: u64,
     pub ntfy_base_url: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ZenodoConfig {
+    pub token: String,
+    pub deposit_id: String,
+    pub publish_interval_seconds: u64,
 }
 
 impl StreamConfig {
@@ -91,6 +102,14 @@ impl StreamConfig {
             success_shard_max_records: args.success_shard_max_records,
             success_shard_max_bytes: args.success_shard_max_bytes,
             ntfy_base_url: env_string("CLASSYFIRE_NTFY_BASE_URL", DEFAULT_NTFY_BASE_URL),
+            zenodo_token: env_string("ZENODO_TOKEN", ""),
+            zenodo_deposit_id: env_string_opt("CLASSYFIRE_ZENODO_DEPOSIT_ID")
+                .or_else(|| env_string_opt("ZENODO_DEPOSIT_ID"))
+                .unwrap_or_default(),
+            zenodo_publish_interval_seconds: env_u64(
+                "CLASSYFIRE_ZENODO_PUBLISH_INTERVAL_SECONDS",
+                DEFAULT_ZENODO_PUBLISH_INTERVAL_SECONDS,
+            ),
         }
     }
 
@@ -107,7 +126,24 @@ impl StreamConfig {
         if self.success_shard_max_bytes == 0 {
             bail!("--success-shard-max-bytes must be greater than zero");
         }
+        if self.zenodo_token.trim().is_empty() {
+            bail!("ZENODO_TOKEN must be set");
+        }
+        if self.zenodo_deposit_id.trim().is_empty() {
+            bail!("CLASSYFIRE_ZENODO_DEPOSIT_ID must be set");
+        }
+        if self.zenodo_publish_interval_seconds == 0 {
+            bail!("CLASSYFIRE_ZENODO_PUBLISH_INTERVAL_SECONDS must be greater than zero");
+        }
         Ok(())
+    }
+
+    pub fn zenodo_config(&self) -> ZenodoConfig {
+        ZenodoConfig {
+            token: self.zenodo_token.clone(),
+            deposit_id: self.zenodo_deposit_id.clone(),
+            publish_interval_seconds: self.zenodo_publish_interval_seconds,
+        }
     }
 }
 
@@ -132,6 +168,10 @@ impl NotifyZenodoReleaseConfig {
 
 fn env_string(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_owned())
+}
+
+fn env_string_opt(key: &str) -> Option<String> {
+    env::var(key).ok().filter(|value| !value.trim().is_empty())
 }
 
 fn env_u64(key: &str, default: u64) -> u64 {
@@ -238,6 +278,9 @@ mod tests {
             ("CLASSYFIRE_THROTTLE_BACKOFF_SECONDS", "11"),
             ("CLASSYFIRE_STATUS_INTERVAL_SECONDS", "13"),
             ("CLASSYFIRE_NTFY_BASE_URL", "https://ntfy.example"),
+            ("ZENODO_TOKEN", "token-123"),
+            ("CLASSYFIRE_ZENODO_DEPOSIT_ID", "deposit-456"),
+            ("CLASSYFIRE_ZENODO_PUBLISH_INTERVAL_SECONDS", "17"),
         ]);
 
         let config = StreamConfig::from_env(StreamArgs {
@@ -256,6 +299,9 @@ mod tests {
         assert_eq!(config.success_shard_max_records, 42);
         assert_eq!(config.success_shard_max_bytes, 99);
         assert_eq!(config.ntfy_base_url, "https://ntfy.example");
+        assert_eq!(config.zenodo_token, "token-123");
+        assert_eq!(config.zenodo_deposit_id, "deposit-456");
+        assert_eq!(config.zenodo_publish_interval_seconds, 17);
     }
 
     #[test]
@@ -280,6 +326,24 @@ mod tests {
     }
 
     #[test]
+    fn stream_config_accepts_legacy_zenodo_deposit_id_env_var() {
+        let _lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _env = EnvGuard::set(&[
+            ("ZENODO_TOKEN", "token-123"),
+            ("ZENODO_DEPOSIT_ID", "deposit-legacy"),
+        ]);
+
+        let config = StreamConfig::from_env(StreamArgs {
+            input: PathBuf::from("input.tsv"),
+            output_dir: PathBuf::from("out"),
+            success_shard_max_records: 42,
+            success_shard_max_bytes: 99,
+        });
+
+        assert_eq!(config.zenodo_deposit_id, "deposit-legacy");
+    }
+
+    #[test]
     fn validate_rejects_zero_get_sleep() {
         let mut config = StreamConfig::from_env(StreamArgs {
             input: PathBuf::from("input.tsv"),
@@ -287,6 +351,8 @@ mod tests {
             success_shard_max_records: 1,
             success_shard_max_bytes: 1,
         });
+        config.zenodo_token = "token".to_owned();
+        config.zenodo_deposit_id = "deposit".to_owned();
         config.get_sleep_seconds = 0;
         let error = config.validate().unwrap_err().to_string();
         assert!(error.contains("CLASSYFIRE_GET_SLEEP_SECONDS"));
@@ -300,6 +366,8 @@ mod tests {
             success_shard_max_records: 1,
             success_shard_max_bytes: 1,
         });
+        config.zenodo_token = "token".to_owned();
+        config.zenodo_deposit_id = "deposit".to_owned();
         config.status_interval_seconds = 0;
         let error = config.validate().unwrap_err().to_string();
         assert!(error.contains("CLASSYFIRE_STATUS_INTERVAL_SECONDS"));
@@ -313,6 +381,8 @@ mod tests {
             success_shard_max_records: 1,
             success_shard_max_bytes: 1,
         });
+        config.zenodo_token = "token".to_owned();
+        config.zenodo_deposit_id = "deposit".to_owned();
         config.success_shard_max_records = 0;
         let error = config.validate().unwrap_err().to_string();
         assert!(error.contains("--success-shard-max-records"));
@@ -321,6 +391,40 @@ mod tests {
         config.success_shard_max_bytes = 0;
         let error = config.validate().unwrap_err().to_string();
         assert!(error.contains("--success-shard-max-bytes"));
+    }
+
+    #[test]
+    fn validate_rejects_missing_zenodo_settings() {
+        let mut config = StreamConfig::from_env(StreamArgs {
+            input: PathBuf::from("input.tsv"),
+            output_dir: PathBuf::from("out"),
+            success_shard_max_records: 1,
+            success_shard_max_bytes: 1,
+        });
+        config.zenodo_token.clear();
+        config.zenodo_deposit_id = "deposit".to_owned();
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("ZENODO_TOKEN"));
+
+        config.zenodo_token = "token".to_owned();
+        config.zenodo_deposit_id.clear();
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("CLASSYFIRE_ZENODO_DEPOSIT_ID"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_zenodo_publish_interval() {
+        let mut config = StreamConfig::from_env(StreamArgs {
+            input: PathBuf::from("input.tsv"),
+            output_dir: PathBuf::from("out"),
+            success_shard_max_records: 1,
+            success_shard_max_bytes: 1,
+        });
+        config.zenodo_token = "token".to_owned();
+        config.zenodo_deposit_id = "deposit".to_owned();
+        config.zenodo_publish_interval_seconds = 0;
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("CLASSYFIRE_ZENODO_PUBLISH_INTERVAL_SECONDS"));
     }
 
     #[test]
