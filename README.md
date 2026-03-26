@@ -24,6 +24,7 @@ The code deliberately sticks to the `GET /entities/{InChIKey}.json` path because
 - resumes from a small checkpoint file
 - prints a per-run ntfy subscription URL with a UUID topic
 - publishes a daily ntfy status update at `18:00 UTC`
+- can send an ntfy message when a Zenodo release completes
 - shows a small live TUI with the current key, recent results, and recent errors
 
 The crawler is row-oriented:
@@ -61,6 +62,16 @@ The output directory will contain:
 
 On startup, the runner prints an ntfy URL such as `https://ntfy.sh/<uuid-v4-topic>`.
 That topic receives one daily status message at `18:00 UTC` with the current `completed` and `failed` counts.
+
+If an external Zenodo upload step finishes, it can reuse the same topic:
+
+```bash
+cargo run --release -- notify-zenodo-release \
+  --output-dir /data/classyfire-run \
+  --record-url https://zenodo.org/records/12345678
+```
+
+That posts a one-off ntfy message announcing the completed release URL.
 
 ## CLI View
 

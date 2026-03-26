@@ -78,6 +78,7 @@ Notes:
 
 - `checkpoint.json` stores the current scan position and current output shard metadata.
 - `checkpoint.json` also keeps the ntfy topic so restarts reuse the same status URL.
+- external release tooling can reuse that saved topic through `notify-zenodo-release` to announce a finished Zenodo record.
 - The four `*.bits` files are `mmap`ed bitmaps indexed by input row number.
 - The `success/` directory contains the canonical artifact shards.
 

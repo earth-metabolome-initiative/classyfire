@@ -1,5 +1,5 @@
 use crate::api::{validate_entity_body, ApiClient};
-use crate::config::StreamConfig;
+use crate::config::{NotifyZenodoReleaseConfig, StreamConfig};
 use crate::ui::Ui;
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Days, TimeZone, Utc};
@@ -107,6 +107,24 @@ pub fn run_streaming(config: StreamConfig) -> Result<()> {
             .map_err(|_| anyhow!("ntfy reporter panicked"))??;
     }
     Ok(())
+}
+
+pub fn notify_zenodo_release(config: NotifyZenodoReleaseConfig) -> Result<()> {
+    config.validate()?;
+    let checkpoint_path = config.output_dir.join(CHECKPOINT_NAME);
+    let checkpoint = load_checkpoint_file(&checkpoint_path)?;
+    let topic = checkpoint
+        .ntfy_topic
+        .ok_or_else(|| anyhow!("checkpoint does not contain an ntfy topic"))?;
+    let ntfy_client = NtfyClient::new(
+        &config.ntfy_base_url,
+        topic,
+        &config.user_agent,
+        config.timeout_seconds,
+    )?;
+
+    eprintln!("ntfy status URL: {}", ntfy_client.subscription_url());
+    ntfy_client.publish_zenodo_release_completed(&config.record_url)
 }
 
 fn run_stream_worker(
@@ -393,11 +411,7 @@ fn load_or_init_checkpoint(
     input_meta: &InputMetadata,
 ) -> Result<Checkpoint> {
     if checkpoint_path.exists() {
-        let checkpoint: Checkpoint = serde_json::from_slice(
-            &fs::read(checkpoint_path)
-                .with_context(|| format!("failed reading {}", checkpoint_path.display()))?,
-        )
-        .with_context(|| format!("failed parsing {}", checkpoint_path.display()))?;
+        let checkpoint = load_checkpoint_file(checkpoint_path)?;
         if checkpoint.input_path != input_path.to_string_lossy() {
             bail!("checkpoint input path does not match the current input");
         }
@@ -419,6 +433,14 @@ fn load_or_init_checkpoint(
         current_success_records: 0,
         ntfy_topic: None,
     })
+}
+
+fn load_checkpoint_file(checkpoint_path: &Path) -> Result<Checkpoint> {
+    serde_json::from_slice(
+        &fs::read(checkpoint_path)
+            .with_context(|| format!("failed reading {}", checkpoint_path.display()))?,
+    )
+    .with_context(|| format!("failed parsing {}", checkpoint_path.display()))
 }
 
 fn save_checkpoint(path: &Path, checkpoint: &Checkpoint) -> Result<()> {
@@ -907,23 +929,36 @@ impl NtfyClient {
     }
 
     fn publish_daily_status(&self, snapshot: ProgressSnapshot) -> Result<()> {
-        let response = self
-            .client
-            .post(self.subscription_url())
-            .header(
-                "Title",
-                format!("ClassyFire daily status {}", Utc::now().format("%Y-%m-%d")),
-            )
-            .body(format!(
+        self.publish_message(
+            &format!("ClassyFire daily status {}", Utc::now().format("%Y-%m-%d")),
+            &format!(
                 "completed: {}\nfailed: {}\nsuccess: {}\nmiss: {}\ninvalid_input: {}",
                 snapshot.completed(),
                 snapshot.failed,
                 snapshot.success,
                 snapshot.miss,
                 snapshot.invalid
-            ))
+            ),
+            "failed POST ntfy daily status",
+        )
+    }
+
+    fn publish_zenodo_release_completed(&self, record_url: &str) -> Result<()> {
+        self.publish_message(
+            "ClassyFire Zenodo release completed",
+            &format!("record_url: {}", record_url.trim()),
+            "failed POST ntfy zenodo release notification",
+        )
+    }
+
+    fn publish_message(&self, title: &str, body: &str, request_context: &str) -> Result<()> {
+        let response = self
+            .client
+            .post(self.subscription_url())
+            .header("Title", title)
+            .body(body.to_owned())
             .send()
-            .context("failed POST ntfy daily status")?;
+            .with_context(|| request_context.to_owned())?;
         let status = response.status();
         if !status.is_success() {
             let body = response.text().unwrap_or_default();
@@ -1570,5 +1605,69 @@ mod tests {
         assert!(requests[0].headers.contains_key("title"));
         assert!(requests[0].body.contains("completed: 17"));
         assert!(requests[0].body.contains("failed: 3"));
+    }
+
+    #[test]
+    fn ntfy_client_publishes_zenodo_release_completion() {
+        let server = MockServer::new([("/topic-123", MockResponse::text(200, "ok"))]);
+        let client = NtfyClient::new(
+            &server.url(),
+            "topic-123".to_owned(),
+            "classyfire-test/0.1",
+            1,
+        )
+        .unwrap();
+
+        client
+            .publish_zenodo_release_completed("https://zenodo.org/records/123")
+            .unwrap();
+
+        let requests = server.seen_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/topic-123");
+        assert_eq!(
+            requests[0].headers.get("title").map(String::as_str),
+            Some("ClassyFire Zenodo release completed")
+        );
+        assert!(requests[0]
+            .body
+            .contains("record_url: https://zenodo.org/records/123"));
+    }
+
+    #[test]
+    fn notify_zenodo_release_reuses_checkpoint_topic() {
+        let dir = tempdir().unwrap();
+        let output_dir = dir.path().join("run");
+        ensure_output_dirs(&output_dir).unwrap();
+        save_checkpoint(
+            &output_dir.join(CHECKPOINT_NAME),
+            &Checkpoint {
+                input_path: "input.tsv".to_owned(),
+                input_size_bytes: 1,
+                input_mtime_epoch: 1,
+                current_row_index: 0,
+                current_success_shard_id: 1,
+                current_success_records: 0,
+                ntfy_topic: Some("topic-from-checkpoint".to_owned()),
+            },
+        )
+        .unwrap();
+
+        let server = MockServer::new([("/topic-from-checkpoint", MockResponse::text(200, "ok"))]);
+        notify_zenodo_release(NotifyZenodoReleaseConfig {
+            output_dir,
+            record_url: "https://zenodo.org/records/999".to_owned(),
+            user_agent: "classyfire-test/0.1".to_owned(),
+            timeout_seconds: 1,
+            ntfy_base_url: server.url(),
+        })
+        .unwrap();
+
+        let requests = server.seen_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/topic-from-checkpoint");
+        assert!(requests[0]
+            .body
+            .contains("record_url: https://zenodo.org/records/999"));
     }
 }

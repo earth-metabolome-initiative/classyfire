@@ -24,6 +24,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Commands {
     Run(StreamArgs),
+    NotifyZenodoRelease(NotifyZenodoReleaseArgs),
 }
 
 #[derive(Debug, Args, Clone)]
@@ -38,6 +39,14 @@ pub struct StreamArgs {
     pub success_shard_max_bytes: u64,
 }
 
+#[derive(Debug, Args, Clone)]
+pub struct NotifyZenodoReleaseArgs {
+    #[arg(long)]
+    pub output_dir: PathBuf,
+    #[arg(long)]
+    pub record_url: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct StreamConfig {
     pub input: PathBuf,
@@ -50,6 +59,15 @@ pub struct StreamConfig {
     pub status_interval_seconds: u64,
     pub success_shard_max_records: u64,
     pub success_shard_max_bytes: u64,
+    pub ntfy_base_url: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct NotifyZenodoReleaseConfig {
+    pub output_dir: PathBuf,
+    pub record_url: String,
+    pub user_agent: String,
+    pub timeout_seconds: u64,
     pub ntfy_base_url: String,
 }
 
@@ -88,6 +106,25 @@ impl StreamConfig {
         }
         if self.success_shard_max_bytes == 0 {
             bail!("--success-shard-max-bytes must be greater than zero");
+        }
+        Ok(())
+    }
+}
+
+impl NotifyZenodoReleaseConfig {
+    pub fn from_env(args: NotifyZenodoReleaseArgs) -> Self {
+        Self {
+            output_dir: args.output_dir,
+            record_url: args.record_url,
+            user_agent: env_string("CLASSYFIRE_USER_AGENT", DEFAULT_USER_AGENT),
+            timeout_seconds: env_u64("CLASSYFIRE_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS),
+            ntfy_base_url: env_string("CLASSYFIRE_NTFY_BASE_URL", DEFAULT_NTFY_BASE_URL),
+        }
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.record_url.trim().is_empty() {
+            bail!("--record-url must not be empty");
         }
         Ok(())
     }
@@ -165,6 +202,28 @@ mod tests {
                     DEFAULT_SUCCESS_SHARD_MAX_BYTES
                 );
             }
+            Commands::NotifyZenodoRelease(_) => panic!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn parses_notify_zenodo_release_cli_args() {
+        let cli = Cli::try_parse_from([
+            "classyfire-crawler",
+            "notify-zenodo-release",
+            "--output-dir",
+            "run-dir",
+            "--record-url",
+            "https://zenodo.org/records/123",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::NotifyZenodoRelease(args) => {
+                assert_eq!(args.output_dir, PathBuf::from("run-dir"));
+                assert_eq!(args.record_url, "https://zenodo.org/records/123");
+            }
+            Commands::Run(_) => panic!("expected notify-zenodo-release command"),
         }
     }
 
@@ -196,6 +255,27 @@ mod tests {
         assert_eq!(config.status_interval_seconds, 13);
         assert_eq!(config.success_shard_max_records, 42);
         assert_eq!(config.success_shard_max_bytes, 99);
+        assert_eq!(config.ntfy_base_url, "https://ntfy.example");
+    }
+
+    #[test]
+    fn notify_release_config_uses_environment_overrides() {
+        let _lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _env = EnvGuard::set(&[
+            ("CLASSYFIRE_USER_AGENT", "classyfire-test/0.1"),
+            ("CLASSYFIRE_TIMEOUT_SECONDS", "9"),
+            ("CLASSYFIRE_NTFY_BASE_URL", "https://ntfy.example"),
+        ]);
+
+        let config = NotifyZenodoReleaseConfig::from_env(NotifyZenodoReleaseArgs {
+            output_dir: PathBuf::from("out"),
+            record_url: "https://zenodo.org/records/123".to_owned(),
+        });
+
+        assert_eq!(config.output_dir, PathBuf::from("out"));
+        assert_eq!(config.record_url, "https://zenodo.org/records/123");
+        assert_eq!(config.user_agent, "classyfire-test/0.1");
+        assert_eq!(config.timeout_seconds, 9);
         assert_eq!(config.ntfy_base_url, "https://ntfy.example");
     }
 
@@ -241,5 +321,15 @@ mod tests {
         config.success_shard_max_bytes = 0;
         let error = config.validate().unwrap_err().to_string();
         assert!(error.contains("--success-shard-max-bytes"));
+    }
+
+    #[test]
+    fn notify_release_validate_rejects_empty_record_url() {
+        let config = NotifyZenodoReleaseConfig::from_env(NotifyZenodoReleaseArgs {
+            output_dir: PathBuf::from("out"),
+            record_url: "   ".to_owned(),
+        });
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("--record-url"));
     }
 }
