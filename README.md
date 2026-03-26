@@ -35,13 +35,23 @@ The crawler is row-oriented:
 
 There is no SQLite database, no rebuild step, and no export step after the crawl. The success shards are the canonical artifact.
 
+## Fetch Input
+
+The current PubChem source file lives under the official `Compound/Extras` directory as `CID-InChI-Key.gz`. To download it and convert it into the `.zst` form used by the examples below:
+
+```bash
+curl -L -o CID-InChI-Key.gz \
+  https://ftp.ncbi.nlm.nih.gov/pubchem/Compound/Extras/CID-InChI-Key.gz
+gzip -cd CID-InChI-Key.gz | zstd -T0 -19 -o CID-InChI-Key.zst
+```
+
 ## Main Command
 
 Run the downloader:
 
 ```bash
 cargo run --release -- run \
-  --input /data/CID-InChI-Key.full.txt.zst \
+  --input /data/pubchem/CID-InChI-Key.zst \
   --output-dir /data/classyfire-run
 ```
 
