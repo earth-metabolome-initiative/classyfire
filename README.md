@@ -3,6 +3,7 @@
 [![CI](https://github.com/earth-metabolome-initiative/classyfire/actions/workflows/ci.yml/badge.svg)](https://github.com/earth-metabolome-initiative/classyfire/actions/workflows/ci.yml)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19235916.svg)](https://doi.org/10.5281/zenodo.19235916)
 [![license](https://img.shields.io/github/license/earth-metabolome-initiative/classyfire)](LICENSE)
+[![crawl status](https://img.shields.io/badge/crawl_status-124%2C569%2F123%2C541%2C080_labeled_%7C_11.4%2Fmin_%7C_ETA_~2046--11--02-blue)](#project-status)
 
 Rust downloader for streaming the PubChem `CID-InChI-Key` TSV and crawling ClassyFire only through `GET /entities/{InChIKey}.json`.
 
@@ -13,7 +14,11 @@ The code deliberately sticks to the `GET /entities/{InChIKey}.json` path because
 > [!WARNING]
 > The underlying service should be treated with caution. The original ClassyFire paper presents the system as a freely accessible large-scale API and discusses a path toward full open sourcing, but in practice the public service has been unreliable for bulk access and the historical software stack depended on proprietary ChemAxon components. This project therefore assumes that long-term durability must come from local copies, local exports, and periodic archival releases rather than trust in the upstream service remaining stable or fully reproducible.
 >
-> The full PubChem crawl is also extremely slow. PubChem currently contributes about 123.1 million unique `InChIKey`s. At the observed live rate of roughly 3.1 GET requests per minute, a full pass would take on the order of 75 years. Even at the nominal 5-second cadence used by this downloader (12 requests per minute), a full pass would still take about 19.5 years. In other words, this is a long-running label recovery project, not a short-term scrape.
+> The full PubChem crawl is also extremely slow. As of 2026-04-03, this project has labeled `124,569` compounds out of `123,541,080`. At the current API-limited rate of about `11.4` compounds per minute, the remaining `123,416,511` compounds imply about `10,826,010` more minutes of work, or roughly `7,518` days (`20.6` years). If that rate holds, the full pass should complete around `2046-11-02`. Until then, partial archive releases are published weekly. In other words, this is a long-running label recovery project, not a short-term scrape.
+
+## Project Status
+
+Current crawl status: `124,569 / 123,541,080` labeled (`0.101%`) at about `11.4` compounds per minute, with an expected full-pass ETA of around `2046-11-02` if the current rate holds.
 
 ## What It Does
 
