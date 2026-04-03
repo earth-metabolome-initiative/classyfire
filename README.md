@@ -12,13 +12,6 @@ It streams the PubChem `CID-InChI-Key` table, queries ClassyFire through `GET /e
 > [!WARNING]
 > ClassyFire is usable for slow, long-run recovery, not for fast bulk export. This project keeps the request rate conservative and treats local archives as the durable output.
 
-## Project Status
-
-- `124,569 / 123,541,080` compounds labeled (`0.101%`)
-- current rate: about `11.4` compounds per minute
-- expected completion: around `2046-11-02` if that rate holds
-- partial releases are published weekly
-
 ## Quick Start, then wait 20+ years
 
 1. Download the PubChem file and decompress it to plain TSV:
