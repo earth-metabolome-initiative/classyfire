@@ -143,8 +143,7 @@ async fn publish_async(
     let doi = published
         .doi
         .as_ref()
-        .map(ToString::to_string)
-        .unwrap_or_else(|| "unknown".to_owned());
+        .map_or_else(|| "unknown".to_owned(), ToString::to_string);
 
     let record_url = match published.record_id {
         Some(record_id) => {
