@@ -8,6 +8,7 @@ use std::time::Duration;
 const ZENODO_API: &str = "https://zenodo.org/api";
 const REPOSITORY_URL: &str = "https://github.com/earth-metabolome-initiative/classyfire";
 const CLASSYFIRE_URL: &str = "http://classyfire.wishartlab.com";
+const ZENODO_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 
 #[derive(Debug, Clone, Copy)]
 pub struct PublishStats {
@@ -203,6 +204,7 @@ fn fetch_or_create_draft(client: &Client, token: &str, config: &PublishConfig) -
 
 fn zenodo_client() -> Result<Client> {
     Client::builder()
+        .user_agent(ZENODO_USER_AGENT)
         .connect_timeout(Duration::from_secs(30))
         .timeout(Duration::from_secs(300))
         .build()
@@ -352,11 +354,10 @@ fn upload_file(client: &Client, token: &str, bucket_url: &str, path: &Path) -> R
         .put(format!("{bucket_url}/{filename}"))
         .bearer_auth(token)
         .header("Content-Type", "application/octet-stream")
-        .body(Body::new(file))
+        .body(Body::sized(file, file_size))
         .send()
-        .with_context(|| format!("failed to upload {filename} to Zenodo"))?
-        .error_for_status()
-        .with_context(|| format!("Zenodo rejected upload for {filename}"))?;
+        .with_context(|| format!("failed to upload {filename} to Zenodo"))
+        .and_then(|response| ensure_success(response, format!("Zenodo rejected upload for {filename}")))?;
     Ok(())
 }
 
