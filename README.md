@@ -19,7 +19,7 @@ It streams the PubChem `CID-InChI-Key` table, queries ClassyFire through `GET /e
 - expected completion: around `2046-11-02` if that rate holds
 - partial releases are published weekly
 
-## Quick Start
+## Quick Start, then wait 20+ years
 
 1. Download the PubChem file and decompress it to plain TSV:
 
@@ -29,7 +29,7 @@ curl -L -o CID-InChI-Key.gz \
 gzip -cd CID-InChI-Key.gz > CID-InChI-Key.tsv
 ```
 
-1. Create the environment file:
+2. Create the environment file:
 
 ```bash
 cp .env.example .env
@@ -40,7 +40,7 @@ Required variables:
 - `ZENODO_TOKEN`
 - `CLASSYFIRE_ZENODO_DEPOSIT_ID`
 
-1. Run the crawler:
+3. Run the crawler and wait 20+ years:
 
 ```bash
 cargo run --release -- run \

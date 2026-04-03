@@ -357,7 +357,9 @@ fn upload_file(client: &Client, token: &str, bucket_url: &str, path: &Path) -> R
         .body(Body::sized(file, file_size))
         .send()
         .with_context(|| format!("failed to upload {filename} to Zenodo"))
-        .and_then(|response| ensure_success(response, format!("Zenodo rejected upload for {filename}")))?;
+        .and_then(|response| {
+            ensure_success(response, format!("Zenodo rejected upload for {filename}"))
+        })?;
     Ok(())
 }
 
