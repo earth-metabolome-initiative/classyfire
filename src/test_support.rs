@@ -41,6 +41,7 @@ impl MockResponse {
 
 #[derive(Debug, Clone)]
 pub struct SeenRequest {
+    pub method: String,
     pub path: String,
     pub headers: HashMap<String, String>,
     pub body: String,
@@ -137,11 +138,9 @@ fn handle_connection(
         return Ok(());
     }
 
-    let path = request_line
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or("/")
-        .to_owned();
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts.next().unwrap_or("GET").to_owned();
+    let path = request_parts.next().unwrap_or("/").to_owned();
     let mut headers = HashMap::new();
     loop {
         let mut header_line = String::new();
@@ -166,13 +165,15 @@ fn handle_connection(
         .lock()
         .expect("mock server seen_requests mutex poisoned")
         .push(SeenRequest {
+            method: method.clone(),
             path: path.clone(),
             headers,
             body: String::from_utf8_lossy(&body).into_owned(),
         });
 
     let response = routes
-        .get(&path)
+        .get(&format!("{method} {path}"))
+        .or_else(|| routes.get(&path))
         .cloned()
         .unwrap_or_else(|| MockResponse::text(404, "missing route"));
     let status_text = status_text(response.status);

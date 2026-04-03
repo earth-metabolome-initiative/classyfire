@@ -91,6 +91,8 @@ Required environment variables:
 
 The default publish interval is one week (`604800` seconds).
 
+`CLASSYFIRE_ZENODO_DEPOSIT_ID` must be the Zenodo deposition id from the authenticated deposit page, not the public DOI/concept record id. If the configured deposition is still an unpublished seed draft, the first automated publish reuses and publishes that draft directly.
+
 If you need to send a manual ntfy message for an already-completed release, the helper command still exists:
 
 ```bash

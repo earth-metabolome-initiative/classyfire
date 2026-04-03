@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use reqwest::blocking::{Body, Client};
+use reqwest::blocking::{Body, Client, Response};
 use serde_json::{json, Value};
 use std::fs::File;
 use std::path::Path;
@@ -69,34 +69,7 @@ fn publish_with_config(
 ) -> Result<PublishedRelease> {
     let client = zenodo_client()?;
 
-    eprintln!("[zenodo] creating new version...");
-    let new_version: Value = client
-        .post(format!(
-            "{}/deposit/depositions/{}/actions/newversion",
-            config.api_base, config.deposit_id
-        ))
-        .bearer_auth(token)
-        .send()
-        .context("failed to create new version")?
-        .error_for_status()
-        .context("Zenodo rejected new version request")?
-        .json()
-        .context("failed to parse new version response")?;
-
-    let draft_url = new_version["links"]["latest_draft"]
-        .as_str()
-        .ok_or_else(|| anyhow!("missing latest_draft link in new version response"))?;
-    let draft_url = resolve_link(&config.api_base, draft_url);
-
-    let draft: Value = client
-        .get(draft_url)
-        .bearer_auth(token)
-        .send()
-        .context("failed to fetch latest draft")?
-        .error_for_status()
-        .context("Zenodo rejected latest draft fetch")?
-        .json()
-        .context("failed to parse draft response")?;
+    let draft = fetch_or_create_draft(&client, token, config)?;
 
     let bucket_url = draft["links"]["bucket"]
         .as_str()
@@ -164,6 +137,70 @@ fn publish_with_config(
     Ok(PublishedRelease { doi, record_url })
 }
 
+fn fetch_or_create_draft(client: &Client, token: &str, config: &PublishConfig) -> Result<Value> {
+    let current: Value = parse_json_response(
+        ensure_success(
+            client
+                .get(format!(
+                    "{}/deposit/depositions/{}",
+                    config.api_base, config.deposit_id
+                ))
+                .bearer_auth(token)
+                .send()
+                .with_context(|| {
+                    format!("failed to fetch Zenodo deposition {}", config.deposit_id)
+                })?,
+            format!(
+                "Zenodo rejected deposition {} lookup; \
+                 CLASSYFIRE_ZENODO_DEPOSIT_ID must be a Zenodo deposition id, not a public DOI record id",
+                config.deposit_id
+            ),
+        )?,
+        format!(
+            "failed to parse Zenodo deposition {} response",
+            config.deposit_id
+        ),
+    )?;
+
+    if current["submitted"].as_bool() == Some(false) {
+        eprintln!("[zenodo] using existing unpublished draft...");
+        return Ok(current);
+    }
+
+    eprintln!("[zenodo] creating new version...");
+    let new_version: Value = parse_json_response(
+        ensure_success(
+            client
+                .post(format!(
+                    "{}/deposit/depositions/{}/actions/newversion",
+                    config.api_base, config.deposit_id
+                ))
+                .bearer_auth(token)
+                .send()
+                .context("failed to create new version")?,
+            "Zenodo rejected new version request",
+        )?,
+        "failed to parse new version response",
+    )?;
+
+    let draft_url = new_version["links"]["latest_draft"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing latest_draft link in new version response"))?;
+    let draft_url = resolve_link(&config.api_base, draft_url);
+
+    parse_json_response(
+        ensure_success(
+            client
+                .get(draft_url)
+                .bearer_auth(token)
+                .send()
+                .context("failed to fetch latest draft")?,
+            "Zenodo rejected latest draft fetch",
+        )?,
+        "failed to parse draft response",
+    )
+}
+
 fn zenodo_client() -> Result<Client> {
     Client::builder()
         .connect_timeout(Duration::from_secs(30))
@@ -181,6 +218,55 @@ fn resolve_link(api_base: &str, link: &str) -> String {
     } else {
         format!("{}/{}", api_base.trim_end_matches('/'), link)
     }
+}
+
+fn ensure_success(response: Response, context: impl Into<String>) -> Result<Response> {
+    if response.status().is_success() {
+        Ok(response)
+    } else {
+        Err(zenodo_http_error(response, context.into()))
+    }
+}
+
+fn parse_json_response(response: Response, parse_context: impl Into<String>) -> Result<Value> {
+    response.json().context(parse_context.into())
+}
+
+fn zenodo_http_error(response: Response, context: String) -> anyhow::Error {
+    let status = response.status();
+    let detail = response
+        .text()
+        .ok()
+        .and_then(|body| zenodo_error_detail(&body));
+
+    match detail {
+        Some(detail) => anyhow!("{context} (HTTP {status}): {detail}"),
+        None => anyhow!("{context} (HTTP {status})"),
+    }
+}
+
+fn zenodo_error_detail(body: &str) -> Option<String> {
+    let body = body.trim();
+    if body.is_empty() || body.starts_with('<') {
+        return None;
+    }
+
+    if let Ok(value) = serde_json::from_str::<Value>(body) {
+        if let Some(message) = value["message"].as_str() {
+            return Some(message.to_owned());
+        }
+        if let Some(errors) = value["errors"].as_array() {
+            let messages = errors
+                .iter()
+                .filter_map(|error| error["message"].as_str().map(str::to_owned))
+                .collect::<Vec<_>>();
+            if !messages.is_empty() {
+                return Some(messages.join("; "));
+            }
+        }
+    }
+
+    Some(body.lines().next().unwrap_or(body).to_owned())
 }
 
 fn build_metadata(stats: PublishStats) -> Value {
@@ -305,37 +391,44 @@ mod tests {
 
         let server = MockServer::new([
             (
-                "/deposit/depositions/999/actions/newversion",
+                "GET /deposit/depositions/999",
+                crate::test_support::MockResponse::json(
+                    200,
+                    r#"{"id":999,"submitted":true,"links":{"self":"/deposit/depositions/999"}}"#,
+                ),
+            ),
+            (
+                "POST /deposit/depositions/999/actions/newversion",
                 crate::test_support::MockResponse::json(
                     200,
                     r#"{"links":{"latest_draft":"/draft"}}"#,
                 ),
             ),
             (
-                "/draft",
+                "GET /draft",
                 crate::test_support::MockResponse::json(
                     200,
                     r#"{"links":{"bucket":"/bucket"},"id":123,"files":[{"id":"old-file"}]}"#,
                 ),
             ),
             (
-                "/deposit/depositions/123/files/old-file",
+                "DELETE /deposit/depositions/123/files/old-file",
                 crate::test_support::MockResponse::text(204, ""),
             ),
             (
-                "/deposit/depositions/123",
+                "PUT /deposit/depositions/123",
                 crate::test_support::MockResponse::json(200, r#"{"updated":"metadata"}"#),
             ),
             (
-                "/bucket/classyfire-labels.jsonl.zst",
+                "PUT /bucket/classyfire-labels.jsonl.zst",
                 crate::test_support::MockResponse::json(200, r#"{"uploaded":"output"}"#),
             ),
             (
-                "/bucket/manifest.json",
+                "PUT /bucket/manifest.json",
                 crate::test_support::MockResponse::json(200, r#"{"uploaded":"manifest"}"#),
             ),
             (
-                "/deposit/depositions/123/actions/publish",
+                "POST /deposit/depositions/123/actions/publish",
                 crate::test_support::MockResponse::json(
                     200,
                     r#"{"doi":"10.5281/zenodo.123","links":{"html":"https://zenodo.org/records/123"}}"#,
@@ -363,12 +456,81 @@ mod tests {
         assert_eq!(published.doi, "10.5281/zenodo.123");
         assert_eq!(published.record_url, "https://zenodo.org/records/123");
         let requests = server.seen_requests();
-        assert_eq!(requests.len(), 7);
+        assert_eq!(requests.len(), 8);
+        assert_eq!(requests[0].path, "/deposit/depositions/999");
         assert!(requests
             .iter()
             .any(|request| request.path == "/bucket/classyfire-labels.jsonl.zst"));
         assert!(requests
             .iter()
             .any(|request| request.path == "/bucket/manifest.json"));
+    }
+
+    #[test]
+    fn publishes_existing_unsubmitted_draft_without_new_version() {
+        let temp_dir = tempdir().unwrap();
+        let output_path = temp_dir.path().join("classyfire-labels.jsonl.zst");
+        let manifest_path = temp_dir.path().join("manifest.json");
+        std::fs::write(&output_path, b"output-bytes").unwrap();
+        std::fs::write(&manifest_path, br#"{"manifest_version":1}"#).unwrap();
+
+        let server = MockServer::new([
+            (
+                "GET /deposit/depositions/999",
+                crate::test_support::MockResponse::json(
+                    200,
+                    r#"{"id":999,"submitted":false,"links":{"bucket":"/bucket"},"files":[{"id":"old-file"}]}"#,
+                ),
+            ),
+            (
+                "DELETE /deposit/depositions/999/files/old-file",
+                crate::test_support::MockResponse::text(204, ""),
+            ),
+            (
+                "PUT /deposit/depositions/999",
+                crate::test_support::MockResponse::json(200, r#"{"updated":"metadata"}"#),
+            ),
+            (
+                "PUT /bucket/classyfire-labels.jsonl.zst",
+                crate::test_support::MockResponse::json(200, r#"{"uploaded":"output"}"#),
+            ),
+            (
+                "PUT /bucket/manifest.json",
+                crate::test_support::MockResponse::json(200, r#"{"uploaded":"manifest"}"#),
+            ),
+            (
+                "POST /deposit/depositions/999/actions/publish",
+                crate::test_support::MockResponse::json(
+                    200,
+                    r#"{"doi":"10.5281/zenodo.999","links":{"html":"https://zenodo.org/records/999"}}"#,
+                ),
+            ),
+        ]);
+
+        let published = publish_with_config(
+            "token",
+            &output_path,
+            &manifest_path,
+            PublishStats {
+                success: 7,
+                miss: 2,
+                invalid: 1,
+                failed: 3,
+            },
+            &PublishConfig {
+                api_base: server.url(),
+                deposit_id: "999".to_owned(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(published.doi, "10.5281/zenodo.999");
+        assert_eq!(published.record_url, "https://zenodo.org/records/999");
+        let requests = server.seen_requests();
+        assert_eq!(requests.len(), 6);
+        assert_eq!(requests[0].path, "/deposit/depositions/999");
+        assert!(requests
+            .iter()
+            .all(|request| request.path != "/deposit/depositions/999/actions/newversion"));
     }
 }
