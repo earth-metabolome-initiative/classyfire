@@ -5,46 +5,23 @@
 [![license](https://img.shields.io/github/license/earth-metabolome-initiative/classyfire)](LICENSE)
 [![crawl status](https://img.shields.io/badge/crawl_status-124%2C569%2F123%2C541%2C080_labeled_%7C_11.4%2Fmin_%7C_ETA_~2046--11--02-blue)](#project-status)
 
-Rust downloader for streaming the PubChem `CID-InChI-Key` TSV and crawling ClassyFire only through `GET /entities/{InChIKey}.json`.
+Rust crawler for building a local copy of ClassyFire labels for PubChem compounds.
 
-This project exists to build a local, durable copy of ClassyFire labels for PubChem compounds with a very small operational footprint. The crawler streams the input once, writes successful classifications directly into compressed output shards, and tracks terminal row states in compact bitmap files instead of a database.
-
-The code deliberately sticks to the `GET /entities/{InChIKey}.json` path because it has been much less fragile than the batch query flow. The batch endpoints were accepted by the server, but in practice they were too unreliable to drain at scale, with slow queues, throttling, HTML error pages, and multi-page result retrieval failures. This downloader therefore optimizes for boring long-run stability rather than maximum short-term throughput.
+It streams the PubChem `CID-InChI-Key` table, queries ClassyFire through `GET /entities/{InChIKey}.json`, writes successful responses into compressed shards, and publishes weekly partial releases.
 
 > [!WARNING]
-> The underlying service should be treated with caution. The original ClassyFire paper presents the system as a freely accessible large-scale API and discusses a path toward full open sourcing, but in practice the public service has been unreliable for bulk access and the historical software stack depended on proprietary ChemAxon components. This project therefore assumes that long-term durability must come from local copies, local exports, and periodic archival releases rather than trust in the upstream service remaining stable or fully reproducible.
->
-> The full PubChem crawl is also extremely slow. As of 2026-04-03, this project has labeled `124,569` compounds out of `123,541,080`. At the current API-limited rate of about `11.4` compounds per minute, the remaining `123,416,511` compounds imply about `10,826,010` more minutes of work, or roughly `7,518` days (`20.6` years). If that rate holds, the full pass should complete around `2046-11-02`. Until then, partial archive releases are published weekly. In other words, this is a long-running label recovery project, not a short-term scrape.
+> ClassyFire is usable for slow, long-run recovery, not for fast bulk export. This project keeps the request rate conservative and treats local archives as the durable output.
 
 ## Project Status
 
-Current crawl status: `124,569 / 123,541,080` labeled (`0.101%`) at about `11.4` compounds per minute, with an expected full-pass ETA of around `2046-11-02` if the current rate holds.
+- `124,569 / 123,541,080` compounds labeled (`0.101%`)
+- current rate: about `11.4` compounds per minute
+- expected completion: around `2046-11-02` if that rate holds
+- partial releases are published weekly
 
-## What It Does
+## Quick Start
 
-- streams the PubChem `CID-InChI-Key` TSV directly from plain text or `.zst`
-- calls `GET /entities/{InChIKey}.json` at a conservative fixed cadence
-- writes successful results directly into rotating `JSONL.zst` shards
-- tracks terminal row states in `mmap`ed bitmap files
-- resumes from a small checkpoint file
-- prints a per-run ntfy subscription URL with a UUID topic
-- sends an ntfy startup message that includes the subscription URL and current counts
-- publishes a daily ntfy status update at `18:00 UTC`
-- publishes a merged Zenodo snapshot periodically from sealed success shards
-- sends an ntfy message after each Zenodo publish attempt
-- shows a small live TUI with the current key, recent results, and recent errors
-
-The crawler is row-oriented:
-
-- duplicate `InChIKey`s are allowed
-- each input row is handled independently
-- successful output keeps `CID`, `InChI`, `InChIKey`, and the full raw ClassyFire response
-
-There is no SQLite database, no rebuild step, and no export step after the crawl. The success shards are the canonical artifact.
-
-## Fetch Input
-
-The current PubChem source file lives under the official `Compound/Extras` directory as `CID-InChI-Key.gz`. The crawler can read plain TSV or `.zst`. It does not read `.gz` directly, so the simplest setup is to decompress once to plain TSV:
+1. Download the PubChem file and decompress it to plain TSV:
 
 ```bash
 curl -L -o CID-InChI-Key.gz \
@@ -52,103 +29,24 @@ curl -L -o CID-InChI-Key.gz \
 gzip -cd CID-InChI-Key.gz > CID-InChI-Key.tsv
 ```
 
-## Main Command
+1. Create the environment file:
 
-Run the downloader:
+```bash
+cp .env.example .env
+```
+
+Required variables:
+
+- `ZENODO_TOKEN`
+- `CLASSYFIRE_ZENODO_DEPOSIT_ID`
+
+1. Run the crawler:
 
 ```bash
 cargo run --release -- run \
   --input ./CID-InChI-Key.tsv \
   --output-dir ./classyfire-run
 ```
-
-The output directory will contain:
-
-```text
-./classyfire-run/
-  checkpoint.json
-  state.success.bits
-  state.miss.bits
-  state.invalid.bits
-  state.failed.bits
-  releases/
-  success/
-    success-000001.jsonl.zst
-    success-000002.jsonl.zst
-    ...
-```
-
-On startup, the runner prints an ntfy URL such as `https://ntfy.sh/<uuid-v4-topic>` and sends a startup message to that topic with:
-
-- the subscription URL
-- the input path
-- the output directory
-- the current `completed` and `failed` counts
-
-That same topic then receives one daily status message at `18:00 UTC` with the current `completed` and `failed` counts.
-
-The `run` command also requires Zenodo credentials at startup. It builds a merged `classyfire-labels.jsonl.zst` snapshot from the sealed success shards every `CLASSYFIRE_ZENODO_PUBLISH_INTERVAL_SECONDS` seconds from process start, uploads that snapshot plus a `manifest.json` as a new Zenodo version, and posts the result to the same ntfy topic.
-
-Required environment variables:
-
-- `ZENODO_TOKEN`
-- `CLASSYFIRE_ZENODO_DEPOSIT_ID`
-
-The default publish interval is one week (`604800` seconds).
-
-`CLASSYFIRE_ZENODO_DEPOSIT_ID` must be the Zenodo deposition id from the authenticated deposit page, not the public DOI/concept record id. If the configured deposition is still an unpublished seed draft, the first automated publish reuses and publishes that draft directly.
-
-If you need to send a manual ntfy message for an already-completed release, the helper command still exists:
-
-```bash
-cargo run --release -- notify-zenodo-release \
-  --output-dir ./classyfire-run \
-  --record-url https://zenodo.org/records/12345678
-```
-
-That posts a one-off ntfy message announcing the completed release URL.
-
-## Defaults
-
-Runtime defaults are in `src/config.rs`:
-
-- GET cadence: `5s`
-- throttle backoff: `300s`
-- request timeout: `30s`
-- status refresh: `1s`
-- success shard rotation: `100,000` records or `128 MiB`
-- ntfy base URL: `https://ntfy.sh`
-- Zenodo publish interval: `604800s` (`7d`)
-
-Operational settings come from `CLASSYFIRE_*` environment variables plus the required `ZENODO_TOKEN`. The binary loads them from `.env` automatically at startup.
-
-Start by copying the checked-in example:
-
-```bash
-cp .env.example .env
-```
-
-## Resource Estimates
-
-These are rough estimates for the current streaming design, not hard benchmarks. They exclude the PubChem input file itself, which can be stored separately.
-
-- CPU: the crawler is latency-bound, not CPU-bound. At the default `5s` GET cadence it issues only `12` requests per minute, so one small `vCPU` is enough. Average CPU usage should usually stay in the low single-digit percent range of one core, with short spikes for TLS, JSON parsing, and `zstd` compression.
-- RAM: the main fixed state is the four `mmap`ed bitmap files. At `130,000,000` rows they total about `62 MiB`. Add about `8 MiB` for the plain-text input buffer, small HTTP/JSON buffers, the current `zstd` writer, and normal Rust process overhead. A headless run should fit comfortably in about `256 MiB`, and `512 MiB` is a conservative VM target. `4 GiB` of RAM is far more than this design should need.
-- Disk, fixed part: `checkpoint.json` is tiny, and the four bitmap files top out at about `62 MiB` for the full `130M`-row PubChem input. After one year at the nominal `12` requests per minute, the bitmap files would only be about `3.5 MiB`; at the currently observed live rate of about `3.1` requests per minute they would be about `1 MiB`.
-- Disk, growing part: success shards dominate long-run storage. Based on the current sample in `docs/streaming-redesign.md`, `JSONL.zst` success output is about `535` compressed bytes per successful row.
-- One-year disk growth at the default `5s` cadence: about `3.1 GiB/year` in the worst case where every request becomes a stored success record, or about `1.6 GiB/year` if the current sample success ratio of roughly `52%` holds.
-- One-year disk growth at the currently observed live rate (`3.1` requests per minute): about `0.8 GiB/year` worst-case, or about `0.4 GiB/year` at the same sample success ratio.
-
-## Terminal States
-
-Each input row ends in exactly one terminal state:
-
-- `success`
-- `miss`
-- `invalid_input`
-- `failed`
-
-Only `success` produces an explicit output record. The other states exist only in the bitmap files.
 
 ## License
 
