@@ -97,6 +97,48 @@ impl MockServer {
         }
     }
 
+    pub fn with_builder(build_routes: impl FnOnce(&str) -> Vec<(String, MockResponse)>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("failed binding mock server");
+        listener
+            .set_nonblocking(true)
+            .expect("failed setting mock server nonblocking");
+        let address = listener.local_addr().expect("missing mock server address");
+        let base_url = format!("http://{address}");
+        let routes = Arc::new(
+            build_routes(&base_url)
+                .into_iter()
+                .collect::<HashMap<_, _>>(),
+        );
+        let seen_requests = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let thread_routes = Arc::clone(&routes);
+        let thread_seen_requests = Arc::clone(&seen_requests);
+        let thread_stop = Arc::clone(&stop);
+        let handle = thread::spawn(move || loop {
+            if thread_stop.load(Ordering::SeqCst) {
+                break;
+            }
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    handle_connection(stream, &thread_routes, &thread_seen_requests)
+                        .expect("mock server connection handling failed");
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("mock server accept failed: {error}"),
+            }
+        });
+
+        Self {
+            address,
+            seen_requests,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
     pub fn url(&self) -> String {
         format!("http://{}", self.address)
     }
