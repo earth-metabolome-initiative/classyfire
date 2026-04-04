@@ -355,11 +355,12 @@ fn run_stream_reporter(
     status_interval_seconds: u64,
 ) -> Result<()> {
     let _terminal = ui.enter_terminal()?;
+    let completed_at_start = counters.snapshot().completed();
     while running.load(Ordering::SeqCst) {
         if ui.is_interactive() {
             ui.render_dashboard(
                 get_limiter.seconds_until_ready(),
-                counters.snapshot().completed(),
+                session_completed_count(&counters, completed_at_start),
             )?;
         }
         if !sleep_until_stop(&running, status_interval_seconds) {
@@ -1175,6 +1176,13 @@ impl ProgressCounters {
     }
 }
 
+fn session_completed_count(counters: &ProgressCounters, completed_at_start: u64) -> u64 {
+    counters
+        .snapshot()
+        .completed()
+        .saturating_sub(completed_at_start)
+}
+
 struct NtfyClient {
     base_url: String,
     topic: String,
@@ -1920,6 +1928,24 @@ mod tests {
         }));
 
         run_stream_reporter(running, limiter, counters, ui, 1).unwrap();
+    }
+
+    #[test]
+    fn session_completed_count_ignores_persisted_startup_rows() {
+        let counters = ProgressCounters::from_snapshot(ProgressSnapshot {
+            success: 10,
+            miss: 5,
+            invalid: 2,
+            failed: 3,
+        });
+        let completed_at_start = counters.snapshot().completed();
+
+        counters.increment(RowState::Success);
+        counters.increment(RowState::Miss);
+        counters.increment(RowState::Failed);
+
+        assert_eq!(completed_at_start, 17);
+        assert_eq!(session_completed_count(&counters, completed_at_start), 2);
     }
 
     #[test]
