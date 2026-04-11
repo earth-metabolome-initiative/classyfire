@@ -3,7 +3,7 @@
 [![CI](https://github.com/earth-metabolome-initiative/classyfire/actions/workflows/ci.yml/badge.svg)](https://github.com/earth-metabolome-initiative/classyfire/actions/workflows/ci.yml)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19235916.svg)](https://doi.org/10.5281/zenodo.19235916)
 [![license](https://img.shields.io/github/license/earth-metabolome-initiative/classyfire)](LICENSE)
-![crawl status](https://img.shields.io/badge/crawl_status-124%2C569%2F123%2C541%2C080_labeled_%7C_11.4%2Fmin_%7C_ETA_~2046--11--02-blue)
+![crawl status](https://img.shields.io/badge/crawl_status-257%2C112%2F123%2C541%2C080_labeled_%7C_12.0%2Fmin_%7C_ETA_~2045--10--08-blue)
 
 Rust crawler for building a local copy of ClassyFire labels for PubChem compounds.
 
