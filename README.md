@@ -12,6 +12,8 @@ It streams the PubChem `CID-InChI-Key` table, queries ClassyFire through `GET /e
 > [!WARNING]
 > ClassyFire is usable for slow, long-run recovery, not for fast bulk export. This project keeps the request rate conservative and treats local archives as the durable output.
 
+![ClassyFire progress dashboard](classyfire-progress.svg)
+
 ## Quick Start, then wait 20+ years
 
 1. Download the PubChem file and decompress it to plain TSV:
@@ -42,10 +44,6 @@ cargo run --release -- run \
 ```
 
 ## Progress Report
-
-Current dashboard snapshot:
-
-![ClassyFire progress dashboard](classyfire-progress.svg)
 
 Render a single SVG snapshot from the current local crawl state:
 
