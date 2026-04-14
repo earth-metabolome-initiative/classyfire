@@ -114,9 +114,6 @@ impl StreamConfig {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
-        if self.get_sleep_seconds == 0 {
-            bail!("CLASSYFIRE_GET_SLEEP_SECONDS must be greater than zero");
-        }
         if self.status_interval_seconds == 0 {
             bail!("CLASSYFIRE_STATUS_INTERVAL_SECONDS must be greater than zero");
         }
@@ -344,7 +341,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_zero_get_sleep() {
+    fn validate_accepts_zero_get_sleep() {
         let mut config = StreamConfig::from_env(StreamArgs {
             input: PathBuf::from("input.tsv"),
             output_dir: PathBuf::from("out"),
@@ -354,8 +351,7 @@ mod tests {
         config.zenodo_token = "token".to_owned();
         config.zenodo_deposit_id = "deposit".to_owned();
         config.get_sleep_seconds = 0;
-        let error = config.validate().unwrap_err().to_string();
-        assert!(error.contains("CLASSYFIRE_GET_SLEEP_SECONDS"));
+        config.validate().unwrap();
     }
 
     #[test]

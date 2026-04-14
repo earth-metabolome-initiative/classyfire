@@ -250,7 +250,7 @@ fn run_stream_worker(
         }
 
         ui.note_current_key(&inchikey);
-        if !get_limiter.acquire(&running) {
+        if !get_limiter.acquire(running.as_ref()) {
             break;
         }
 
@@ -331,7 +331,7 @@ fn run_ntfy_reporter(
         let now = Utc::now();
         let next_publish_at = next_ntfy_publish_after(now);
         let wait_for = (next_publish_at - now).to_std().unwrap_or(Duration::ZERO);
-        if !sleep_until_stop_with_granularity(&running, wait_for, Duration::from_secs(1)) {
+        if !sleep_until_stop_with_granularity(running.as_ref(), wait_for, Duration::from_secs(1)) {
             break;
         }
         let snapshot = counters.snapshot();
@@ -360,7 +360,7 @@ fn run_stream_reporter(
                 session_completed_count(&counters, completed_at_start),
             )?;
         }
-        if !sleep_until_stop(&running, status_interval_seconds) {
+        if !sleep_until_stop(running.as_ref(), status_interval_seconds) {
             break;
         }
     }
@@ -1332,12 +1332,16 @@ struct GetRateLimiter {
 impl GetRateLimiter {
     fn new(interval_seconds: u64) -> Self {
         Self {
-            interval: Duration::from_secs(interval_seconds.max(1)),
+            interval: Duration::from_secs(interval_seconds),
             next_allowed: Mutex::new(Instant::now()),
         }
     }
 
-    fn acquire(&self, running: &Arc<AtomicBool>) -> bool {
+    fn acquire(&self, running: &AtomicBool) -> bool {
+        if self.interval.is_zero() {
+            return running.load(Ordering::SeqCst);
+        }
+
         loop {
             if !running.load(Ordering::SeqCst) {
                 return false;
@@ -1360,8 +1364,11 @@ impl GetRateLimiter {
             match wait_for {
                 None => return true,
                 Some(duration) => {
-                    let sleep_seconds = duration.as_secs().max(1);
-                    if !sleep_until_stop(running, sleep_seconds) {
+                    if !sleep_until_stop_with_granularity(
+                        running,
+                        duration,
+                        Duration::from_millis(1),
+                    ) {
                         return false;
                     }
                 }
@@ -1370,11 +1377,15 @@ impl GetRateLimiter {
     }
 
     fn backoff(&self, seconds: u64) {
+        if seconds == 0 {
+            return;
+        }
+
         let mut next_allowed = self
             .next_allowed
             .lock()
             .expect("get rate limiter mutex poisoned");
-        let candidate = Instant::now() + Duration::from_secs(seconds.max(1));
+        let candidate = Instant::now() + Duration::from_secs(seconds);
         if candidate > *next_allowed {
             *next_allowed = candidate;
         }
@@ -1391,7 +1402,7 @@ impl GetRateLimiter {
     }
 }
 
-fn sleep_until_stop(running: &Arc<AtomicBool>, seconds: u64) -> bool {
+fn sleep_until_stop(running: &AtomicBool, seconds: u64) -> bool {
     sleep_until_stop_with_granularity(
         running,
         Duration::from_secs(seconds),
@@ -1400,7 +1411,7 @@ fn sleep_until_stop(running: &Arc<AtomicBool>, seconds: u64) -> bool {
 }
 
 fn sleep_until_stop_with_granularity(
-    running: &Arc<AtomicBool>,
+    running: &AtomicBool,
     duration: Duration,
     granularity: Duration,
 ) -> bool {
@@ -2012,17 +2023,27 @@ mod tests {
     #[test]
     fn sleep_and_backoff_helpers_cover_stop_and_other_reason() {
         let running = Arc::new(AtomicBool::new(false));
-        assert!(!sleep_until_stop(&running, 1));
+        assert!(!sleep_until_stop(running.as_ref(), 1));
         assert!(!sleep_until_stop_with_granularity(
-            &running,
+            running.as_ref(),
             Duration::from_millis(10),
             Duration::from_millis(1),
         ));
 
         let limiter = GetRateLimiter {
+            interval: Duration::ZERO,
+            next_allowed: Mutex::new(Instant::now()),
+        };
+        let running = Arc::new(AtomicBool::new(true));
+        assert!(limiter.acquire(running.as_ref()));
+        assert_eq!(limiter.seconds_until_ready(), 0);
+
+        let limiter = GetRateLimiter {
             interval: Duration::from_secs(1),
             next_allowed: Mutex::new(Instant::now()),
         };
+        limiter.backoff(0);
+        assert_eq!(limiter.seconds_until_ready(), 0);
         limiter.backoff(2);
         assert!(limiter.seconds_until_ready() >= 1);
         assert!(!is_throttled_or_html("plain transport error"));
