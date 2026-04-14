@@ -41,6 +41,26 @@ cargo run --release -- run \
   --output-dir ./classyfire-run
 ```
 
+## Progress Report
+
+Render a single SVG snapshot from the current local crawl state:
+
+```bash
+cargo run --release --bin classyfire-progress-report -- \
+  --output-dir ./classyfire-run \
+  --output ./classyfire-progress.svg
+```
+
+Render from the latest Zenodo release instead:
+
+```bash
+cargo run --release --bin classyfire-progress-report -- \
+  --zenodo-doi \
+  --output ./classyfire-progress.svg
+```
+
+If the latest release does not yet include `progress-summary.json`, pass `--pubchem-total-rows` so the tool can fall back to the published dataset and manifest.
+
 ## License
 
 MIT

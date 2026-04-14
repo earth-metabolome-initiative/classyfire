@@ -1,5 +1,11 @@
 use crate::api::{validate_entity_body, ApiClient};
 use crate::config::{NotifyZenodoReleaseConfig, StreamConfig, ZenodoConfig};
+use crate::progress::{
+    build_release_progress_summary, resolve_pubchem_total_rows, write_progress_summary,
+    CHECKPOINT_NAME, FAILED_BITMAP_NAME, INVALID_BITMAP_NAME, MISS_BITMAP_NAME,
+    RELEASE_DATASET_FILENAME, RELEASE_DIR_NAME, RELEASE_MANIFEST_FILENAME,
+    RELEASE_PROGRESS_SUMMARY_FILENAME, SUCCESS_BITMAP_NAME, SUCCESS_DIR_NAME,
+};
 use crate::ui::Ui;
 use crate::zenodo::{publish as publish_zenodo_release, PublishStats};
 use anyhow::{anyhow, bail, Context, Result};
@@ -18,15 +24,6 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use uuid::Uuid;
 
 const BITMAP_GROWTH_BITS: u64 = 1 << 20;
-const SUCCESS_BITMAP_NAME: &str = "state.success.bits";
-const MISS_BITMAP_NAME: &str = "state.miss.bits";
-const INVALID_BITMAP_NAME: &str = "state.invalid.bits";
-const FAILED_BITMAP_NAME: &str = "state.failed.bits";
-const CHECKPOINT_NAME: &str = "checkpoint.json";
-const RELEASE_DATASET_FILENAME: &str = "classyfire-labels.jsonl.zst";
-const RELEASE_DIR_NAME: &str = "releases";
-const RELEASE_MANIFEST_FILENAME: &str = "manifest.json";
-const SUCCESS_DIR_NAME: &str = "success";
 
 static CTRLC_HANDLER_INSTALLED: OnceLock<()> = OnceLock::new();
 static CTRLC_TARGET: OnceLock<Mutex<Option<CtrlcTarget>>> = OnceLock::new();
@@ -447,8 +444,9 @@ fn publish_current_snapshot_to_zenodo(
     let publish_result = publish_zenodo_release(
         &ctx.zenodo_config.token,
         &ctx.zenodo_config.deposit_id,
-        &release.output_path,
-        &release.manifest_path,
+        &release.dataset,
+        &release.manifest,
+        &release.progress_summary,
         PublishStats {
             success: snapshot.success,
             miss: snapshot.miss,
@@ -468,10 +466,13 @@ fn publish_current_snapshot_to_zenodo(
                 ctx.ui
                     .info(format!("ntfy release notification failed: {error:#}"));
             }
-            fs::remove_file(&release.output_path)
-                .with_context(|| format!("failed removing {}", release.output_path.display()))?;
-            fs::remove_file(&release.manifest_path)
-                .with_context(|| format!("failed removing {}", release.manifest_path.display()))?;
+            fs::remove_file(&release.dataset)
+                .with_context(|| format!("failed removing {}", release.dataset.display()))?;
+            fs::remove_file(&release.manifest)
+                .with_context(|| format!("failed removing {}", release.manifest.display()))?;
+            fs::remove_file(&release.progress_summary).with_context(|| {
+                format!("failed removing {}", release.progress_summary.display())
+            })?;
         }
         Err(error) => {
             ctx.ui.info(format!("Zenodo publish failed: {error:#}"));
@@ -636,11 +637,11 @@ impl StateBitmaps {
     }
 
     fn terminal_state(&mut self, row_index: u64) -> Result<Option<RowState>> {
-        let success = self.success.get(row_index)?;
-        let miss = self.miss.get(row_index)?;
-        let invalid = self.invalid.get(row_index)?;
-        let failed = self.failed.get(row_index)?;
-        let count = success as u8 + miss as u8 + invalid as u8 + failed as u8;
+        let success = self.success.get(row_index);
+        let miss = self.miss.get(row_index);
+        let invalid = self.invalid.get(row_index);
+        let failed = self.failed.get(row_index);
+        let count = u8::from(success) + u8::from(miss) + u8::from(invalid) + u8::from(failed);
         if count > 1 {
             bail!("row {row_index} has multiple terminal states");
         }
@@ -688,10 +689,10 @@ impl StateBitmaps {
 
     fn snapshot_counts(&self) -> Result<ProgressSnapshot> {
         Ok(ProgressSnapshot {
-            success: self.success.count_ones()?,
-            miss: self.miss.count_ones()?,
-            invalid: self.invalid.count_ones()?,
-            failed: self.failed.count_ones()?,
+            success: self.success.count_ones(),
+            miss: self.miss.count_ones(),
+            invalid: self.invalid.count_ones(),
+            failed: self.failed.count_ones(),
         })
     }
 }
@@ -733,12 +734,12 @@ impl MappedBitmap {
         })
     }
 
-    fn get(&mut self, row_index: u64) -> Result<bool> {
+    fn get(&mut self, row_index: u64) -> bool {
         if row_index >= self.capacity_bits {
-            return Ok(false);
+            return false;
         }
         let (byte_index, mask) = bit_position(row_index);
-        Ok(self.map[byte_index] & mask != 0)
+        self.map[byte_index] & mask != 0
     }
 
     fn set(&mut self, row_index: u64) -> Result<()> {
@@ -779,8 +780,11 @@ impl MappedBitmap {
         self.map.flush().context("failed flushing bitmap")
     }
 
-    fn count_ones(&self) -> Result<u64> {
-        Ok(self.map.iter().map(|byte| byte.count_ones() as u64).sum())
+    fn count_ones(&self) -> u64 {
+        self.map
+            .iter()
+            .map(|byte| u64::from(byte.count_ones()))
+            .sum()
     }
 }
 
@@ -952,8 +956,9 @@ fn success_shard_path(output_dir: &Path, shard_id: u64) -> PathBuf {
 }
 
 struct ReleaseArtifacts {
-    output_path: PathBuf,
-    manifest_path: PathBuf,
+    dataset: PathBuf,
+    manifest: PathBuf,
+    progress_summary: PathBuf,
 }
 
 fn build_release_artifacts(
@@ -962,7 +967,7 @@ fn build_release_artifacts(
 ) -> Result<Option<ReleaseArtifacts>> {
     let mut shards = fs::read_dir(success_dir(output_dir))
         .with_context(|| format!("failed reading {}", success_dir(output_dir).display()))?
-        .filter_map(|entry| entry.ok())
+        .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("zst"))
         .filter_map(|path| match fs::metadata(&path) {
@@ -977,10 +982,12 @@ fn build_release_artifacts(
     }
 
     let release_dir = release_dir(output_dir);
-    let output_path = release_dir.join(RELEASE_DATASET_FILENAME);
+    let dataset = release_dir.join(RELEASE_DATASET_FILENAME);
     let manifest_path = release_dir.join(RELEASE_MANIFEST_FILENAME);
+    let progress_summary_path = release_dir.join(RELEASE_PROGRESS_SUMMARY_FILENAME);
     let output_tmp = release_dir.join(format!("{RELEASE_DATASET_FILENAME}.tmp"));
     let manifest_tmp = release_dir.join(format!("{RELEASE_MANIFEST_FILENAME}.tmp"));
+    let progress_summary_tmp = release_dir.join(format!("{RELEASE_PROGRESS_SUMMARY_FILENAME}.tmp"));
 
     {
         let mut output = File::create(&output_tmp)
@@ -1016,12 +1023,23 @@ fn build_release_artifacts(
         serde_json::to_vec_pretty(&manifest).context("failed serializing release manifest")?,
     )
     .with_context(|| format!("failed writing {}", manifest_tmp.display()))?;
+    let progress_summary = build_release_progress_summary(
+        output_dir,
+        resolve_pubchem_total_rows(output_dir, None)?,
+        crate::progress::CrawlCounts {
+            success_rows: snapshot.success,
+            miss_rows: snapshot.miss,
+            invalid_rows: snapshot.invalid,
+            failed_rows: snapshot.failed,
+        },
+    )?;
+    write_progress_summary(&progress_summary_tmp, &progress_summary)?;
 
-    fs::rename(&output_tmp, &output_path).with_context(|| {
+    fs::rename(&output_tmp, &dataset).with_context(|| {
         format!(
             "failed renaming {} to {}",
             output_tmp.display(),
-            output_path.display()
+            dataset.display()
         )
     })?;
     fs::rename(&manifest_tmp, &manifest_path).with_context(|| {
@@ -1031,10 +1049,18 @@ fn build_release_artifacts(
             manifest_path.display()
         )
     })?;
+    fs::rename(&progress_summary_tmp, &progress_summary_path).with_context(|| {
+        format!(
+            "failed renaming {} to {}",
+            progress_summary_tmp.display(),
+            progress_summary_path.display()
+        )
+    })?;
 
     Ok(Some(ReleaseArtifacts {
-        output_path,
-        manifest_path,
+        dataset,
+        manifest: manifest_path,
+        progress_summary: progress_summary_path,
     }))
 }
 
@@ -1741,6 +1767,31 @@ mod tests {
         let dir = tempdir().unwrap();
         let output_dir = dir.path().join("run");
         ensure_output_dirs(&output_dir).unwrap();
+        let input_path = dir.path().join("input.tsv");
+        fs::write(
+            &input_path,
+            "1\tInChI=1S/CH4/h1H4\tVNWKTOKETHGBQD-UHFFFAOYSA-N\n2\tInChI=1S/H2O/h1H2\tXLYOFNOQVPJJNP-UHFFFAOYSA-N\n",
+        )
+        .unwrap();
+        save_checkpoint(
+            &output_dir.join(CHECKPOINT_NAME),
+            &Checkpoint {
+                input_path: input_path.to_string_lossy().into_owned(),
+                input_size_bytes: fs::metadata(&input_path).unwrap().len(),
+                input_mtime_epoch: fs::metadata(&input_path)
+                    .unwrap()
+                    .modified()
+                    .unwrap()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+                current_row_index: 2,
+                current_success_shard_id: 1,
+                current_success_records: 2,
+                ntfy_topic: None,
+            },
+        )
+        .unwrap();
 
         let mut writer =
             SuccessShardWriter::open(success_dir(&output_dir), 1, 0, 1, u64::MAX).unwrap();
@@ -1783,19 +1834,29 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        let records = read_success_records(&release.output_path);
+        let records = read_success_records(&release.dataset);
         assert_eq!(records.len(), 2);
         assert_eq!(records[0]["cid"], 1);
         assert_eq!(records[1]["cid"], 2);
 
         let manifest: Value =
-            serde_json::from_slice(&fs::read(&release.manifest_path).unwrap()).unwrap();
+            serde_json::from_slice(&fs::read(&release.manifest).unwrap()).unwrap();
         assert_eq!(manifest["format"], "jsonl.zst");
         assert_eq!(manifest["success_rows"], 2);
         assert_eq!(manifest["miss_rows"], 3);
         assert_eq!(manifest["invalid_rows"], 4);
         assert_eq!(manifest["failed_rows"], 5);
         assert_eq!(manifest["shards"].as_array().unwrap().len(), 2);
+
+        let summary: Value =
+            serde_json::from_slice(&fs::read(&release.progress_summary).unwrap()).unwrap();
+        assert_eq!(summary["pubchem_total_rows"], 2);
+        assert_eq!(summary["counts"]["success_rows"], 2);
+        assert_eq!(summary["taxonomy_layers"][4]["unique_class_count"], 2);
+        assert_eq!(
+            summary["taxonomy_layers"][4]["classes"][0]["label_count"],
+            1
+        );
     }
 
     #[test]

@@ -54,12 +54,14 @@ pub fn publish(
     deposit_id: &str,
     output_path: &Path,
     manifest_path: &Path,
+    progress_summary_path: &Path,
     stats: PublishStats,
 ) -> Result<PublishedRelease> {
     publish_with_config(
         token,
         output_path,
         manifest_path,
+        progress_summary_path,
         stats,
         &PublishConfig::production(deposit_id),
     )
@@ -69,6 +71,7 @@ fn publish_with_config(
     token: &str,
     output_path: &Path,
     manifest_path: &Path,
+    progress_summary_path: &Path,
     stats: PublishStats,
     config: &PublishConfig,
 ) -> Result<PublishedRelease> {
@@ -80,6 +83,7 @@ fn publish_with_config(
             token,
             output_path,
             manifest_path,
+            progress_summary_path,
             stats,
             config,
         ))
@@ -89,6 +93,7 @@ async fn publish_async(
     token: &str,
     output_path: &Path,
     manifest_path: &Path,
+    progress_summary_path: &Path,
     stats: PublishStats,
     config: &PublishConfig,
 ) -> Result<PublishedRelease> {
@@ -130,7 +135,7 @@ async fn publish_async(
         .reconcile_files(
             &draft,
             FileReplacePolicy::ReplaceAll,
-            build_upload_specs(output_path, manifest_path)?,
+            build_upload_specs(output_path, manifest_path, progress_summary_path)?,
         )
         .await
         .context("failed to upload Zenodo release artifacts")?;
@@ -157,7 +162,7 @@ async fn publish_async(
                 .as_ref()
                 .or(record.links.self_html.as_ref())
                 .or(record.links.doi.as_ref())
-                .map(|url| url.to_string())
+                .map(ToString::to_string)
                 .or_else(|| {
                     if doi == "unknown" {
                         None
@@ -187,7 +192,7 @@ fn zenodo_client(token: &str, config: &PublishConfig) -> Result<ZenodoClient> {
         ))
         .user_agent(ZENODO_USER_AGENT)
         .connect_timeout(Duration::from_secs(30))
-        .request_timeout(Duration::from_secs(300))
+        .request_timeout(Duration::from_mins(5))
         .build()
         .context("failed to build Zenodo HTTP client")
 }
@@ -199,12 +204,18 @@ fn parse_deposition_id(deposit_id: &str) -> Result<DepositionId> {
         .with_context(|| format!("invalid Zenodo deposition id `{deposit_id}`"))
 }
 
-fn build_upload_specs(output_path: &Path, manifest_path: &Path) -> Result<Vec<UploadSpec>> {
+fn build_upload_specs(
+    output_path: &Path,
+    manifest_path: &Path,
+    progress_summary_path: &Path,
+) -> Result<Vec<UploadSpec>> {
     Ok(vec![
         UploadSpec::from_path(output_path)
             .with_context(|| format!("failed to prepare {}", output_path.display()))?,
         UploadSpec::from_path(manifest_path)
             .with_context(|| format!("failed to prepare {}", manifest_path.display()))?,
+        UploadSpec::from_path(progress_summary_path)
+            .with_context(|| format!("failed to prepare {}", progress_summary_path.display()))?,
     ])
 }
 
@@ -220,7 +231,7 @@ fn build_metadata(stats: PublishStats) -> Result<DepositMetadataUpdate> {
             "<p>Open dataset of recovered <a href=\"{CLASSYFIRE_URL}\">ClassyFire</a> labels for PubChem compounds.</p>\
              <p>This snapshot contains {success} successful ClassyFire responses exported as a single merged <code>JSONL.zst</code> file. \
              Rows that ended as misses ({miss}), invalid input ({invalid}), or failed requests ({failed}) are excluded from the release artifact.</p>\
-             <p>The release contains a merged <code>classyfire-labels.jsonl.zst</code> dataset and a machine-readable <code>manifest.json</code> describing the published snapshot.</p>\
+             <p>The release contains a merged <code>classyfire-labels.jsonl.zst</code> dataset, a machine-readable <code>manifest.json</code>, and a compact <code>progress-summary.json</code> for report generation.</p>\
              <p>Handled rows so far: {handled}. Successful rows: {success}. Misses: {miss}. Invalid rows: {invalid}. Failed rows: {failed}.</p>\
              <p>Format: JSON Lines compressed with Zstandard. Updated periodically from the streaming crawler.</p>\
              <p>Source code: <a href=\"{REPOSITORY_URL}\">classyfire</a>.</p>",
@@ -308,6 +319,7 @@ mod tests {
         })
         .unwrap();
         assert!(metadata.description_html.contains("JSONL.zst"));
+        assert!(metadata.description_html.contains("progress-summary.json"));
         assert!(metadata.description_html.contains("Successful rows: 7"));
         assert!(metadata.notes.as_deref().unwrap().contains("Misses: 2"));
     }
@@ -317,8 +329,10 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let output_path = temp_dir.path().join("classyfire-labels.jsonl.zst");
         let manifest_path = temp_dir.path().join("manifest.json");
+        let progress_summary_path = temp_dir.path().join("progress-summary.json");
         std::fs::write(&output_path, b"output-bytes").unwrap();
         std::fs::write(&manifest_path, br#"{"manifest_version":1}"#).unwrap();
+        std::fs::write(&progress_summary_path, br#"{"pubchem_total_rows":1}"#).unwrap();
 
         let server = MockServer::with_builder(|base| {
             vec![
@@ -409,6 +423,13 @@ mod tests {
                     ),
                 ),
                 (
+                    "PUT /api/files/bucket/progress-summary.json".to_owned(),
+                    MockResponse::json(
+                        200,
+                        json!({ "key": "progress-summary.json", "size": 24 }).to_string(),
+                    ),
+                ),
+                (
                     "POST /api/deposit/depositions/123/actions/publish".to_owned(),
                     MockResponse::json(
                         200,
@@ -454,6 +475,7 @@ mod tests {
             "token",
             &output_path,
             &manifest_path,
+            &progress_summary_path,
             PublishStats {
                 success: 7,
                 miss: 2,
@@ -467,7 +489,7 @@ mod tests {
         assert_eq!(published.doi, "10.5281/zenodo.123");
         assert_eq!(published.record_url, "https://zenodo.org/records/123");
         let requests = server.seen_requests();
-        assert_eq!(requests.len(), 11);
+        assert_eq!(requests.len(), 12);
         assert_eq!(requests[0].path, "/api/deposit/depositions/999");
         assert_eq!(requests[1].path, "/api/deposit/depositions/999");
         assert_eq!(
@@ -480,6 +502,9 @@ mod tests {
         assert!(requests
             .iter()
             .any(|request| request.path == "/api/files/bucket/manifest.json"));
+        assert!(requests
+            .iter()
+            .any(|request| request.path == "/api/files/bucket/progress-summary.json"));
     }
 
     #[test]
@@ -487,8 +512,10 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let output_path = temp_dir.path().join("classyfire-labels.jsonl.zst");
         let manifest_path = temp_dir.path().join("manifest.json");
+        let progress_summary_path = temp_dir.path().join("progress-summary.json");
         std::fs::write(&output_path, b"output-bytes").unwrap();
         std::fs::write(&manifest_path, br#"{"manifest_version":1}"#).unwrap();
+        std::fs::write(&progress_summary_path, br#"{"pubchem_total_rows":1}"#).unwrap();
 
         let server = MockServer::with_builder(|base| {
             vec![
@@ -545,6 +572,13 @@ mod tests {
                     ),
                 ),
                 (
+                    "PUT /api/files/bucket/progress-summary.json".to_owned(),
+                    MockResponse::json(
+                        200,
+                        json!({ "key": "progress-summary.json", "size": 24 }).to_string(),
+                    ),
+                ),
+                (
                     "POST /api/deposit/depositions/999/actions/publish".to_owned(),
                     MockResponse::json(
                         200,
@@ -590,6 +624,7 @@ mod tests {
             "token",
             &output_path,
             &manifest_path,
+            &progress_summary_path,
             PublishStats {
                 success: 7,
                 miss: 2,
@@ -603,10 +638,13 @@ mod tests {
         assert_eq!(published.doi, "10.5281/zenodo.999");
         assert_eq!(published.record_url, "https://zenodo.org/records/999");
         let requests = server.seen_requests();
-        assert_eq!(requests.len(), 8);
+        assert_eq!(requests.len(), 9);
         assert_eq!(requests[0].path, "/api/deposit/depositions/999");
         assert!(requests
             .iter()
             .all(|request| request.path != "/api/deposit/depositions/999/actions/newversion"));
+        assert!(requests
+            .iter()
+            .any(|request| request.path == "/api/files/bucket/progress-summary.json"));
     }
 }
