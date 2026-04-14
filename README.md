@@ -10,7 +10,7 @@ Rust crawler for building a local copy of ClassyFire labels for PubChem compound
 It streams the PubChem `CID-InChI-Key` table, queries ClassyFire through `GET /entities/{InChIKey}.json`, writes successful responses into compressed shards, and publishes weekly partial releases.
 
 > [!WARNING]
-> ClassyFire is usable for slow, long-run recovery, not for fast bulk export. This project keeps the request rate conservative and treats local archives as the durable output.
+> ClassyFire is usable for slow, long-run recovery, not for fast bulk export. This project keeps the request rate conservative and treats local archives as the durable output. Download the Zenodo releases directly for any practical use of the data.
 
 ![ClassyFire progress dashboard](classyfire-progress.svg)
 
