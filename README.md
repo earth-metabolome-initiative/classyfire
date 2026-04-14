@@ -43,6 +43,10 @@ cargo run --release -- run \
 
 ## Progress Report
 
+Current dashboard snapshot:
+
+![ClassyFire progress dashboard](classyfire-progress.svg)
+
 Render a single SVG snapshot from the current local crawl state:
 
 ```bash
