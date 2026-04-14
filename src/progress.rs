@@ -4,6 +4,7 @@ use plotters::coord::Shift;
 use plotters::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::f64::consts::{FRAC_PI_2, TAU};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -231,6 +232,24 @@ struct MetricPanel {
     center_caption: String,
     footer_note: Option<String>,
     slices: Vec<MetricSlice>,
+}
+
+#[derive(Debug, Clone)]
+struct MetricOverlayTextLine {
+    text: String,
+    center_x: i32,
+    y: i32,
+    font_size: f64,
+    color: RGBColor,
+}
+
+#[derive(Debug, Clone)]
+struct MetricOverlay {
+    center: (i32, i32),
+    outer_radius: f64,
+    inner_radius: f64,
+    slices: Vec<MetricSlice>,
+    text_lines: Vec<MetricOverlayTextLine>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -531,6 +550,7 @@ pub fn render_progress_svg(
     let summary_cards = summary_row.split_evenly((1, SUMMARY_CARD_COUNT));
     let top_panels = taxonomy_top_row.split_evenly((1, 2));
     let bottom_panels = taxonomy_bottom_row.split_evenly((1, 3));
+    let mut metric_overlays = Vec::with_capacity(SUMMARY_CARD_COUNT);
 
     draw_header(&header, summary, source_label)
         .map_err(|error| anyhow!("failed drawing SVG header: {error:?}"))?;
@@ -541,7 +561,7 @@ pub fn render_progress_svg(
         .zip(metric_panels.iter())
         .zip(metric_errors)
     {
-        draw_metric_panel(panel, metric)
+        draw_metric_panel(panel, metric, &mut metric_overlays)
             .map_err(|error| anyhow!("failed drawing {label}: {error:?}"))?;
     }
 
@@ -560,7 +580,9 @@ pub fn render_progress_svg(
     }
 
     root.present()
-        .map_err(|error| anyhow!("failed finalizing SVG output: {error:?}"))
+        .map_err(|error| anyhow!("failed finalizing SVG output: {error:?}"))?;
+    inject_metric_overlays(output_path, &metric_overlays)?;
+    Ok(())
 }
 
 fn taxonomy_row_height(summary: &ProgressSummary, layers: &[TaxonomyLayer]) -> u32 {
@@ -854,9 +876,9 @@ fn draw_header<DB: DrawingBackend>(
 fn draw_metric_panel<DB: DrawingBackend>(
     area: &DrawingArea<DB, Shift>,
     metric: &MetricPanel,
+    overlays: &mut Vec<MetricOverlay>,
 ) -> std::result::Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
     let panel = prepare_panel(area)?;
-    let screen_panel = panel.use_screen_coord();
     panel.draw(&Text::new(
         metric.title.clone(),
         (24, 28),
@@ -892,24 +914,10 @@ fn draw_metric_panel<DB: DrawingBackend>(
     let radius = (f64::from(dims.1) * 0.34)
         .min(f64::from(dims.0) * 0.16)
         .max(78.0);
-    let sizes: Vec<f64> = metric
-        .slices
-        .iter()
-        .map(|slice| slice.value as f64)
-        .collect();
-    let colors: Vec<RGBColor> = metric.slices.iter().map(|slice| slice.color).collect();
-    let labels = vec![""; metric.slices.len()];
-
     let (x_range, y_range) = panel.get_pixel_range();
     let center_abs = (x_range.end - 180, (y_range.start + y_range.end) / 2 + 14);
 
     let hole_radius = radius * 0.68;
-    let mut pie = Pie::new(&center_abs, &radius, &sizes, &colors, &labels);
-    pie.start_angle(-90.0);
-    pie.donut_hole(hole_radius);
-    screen_panel.draw(&pie)?;
-
-    let value_style = TextStyle::from(("sans-serif", 28).into_font()).color(&TITLE_COLOR);
     let caption_style = TextStyle::from(("sans-serif", 14).into_font()).color(&MUTED_COLOR);
     let caption_lines = wrap_text_to_width(
         &panel,
@@ -923,27 +931,35 @@ fn draw_metric_panel<DB: DrawingBackend>(
     } else {
         center.1 - 18
     };
-    draw_centered_text(
-        &panel,
-        &metric.center_value,
-        center.0,
-        value_y,
-        &value_style,
-    )?;
     let caption_start_y = if caption_lines.len() > 1 {
         center.1 + 2
     } else {
         center.1 + 12
     };
+    let mut text_lines = Vec::with_capacity(caption_lines.len() + 1);
+    text_lines.push(MetricOverlayTextLine {
+        text: metric.center_value.clone(),
+        center_x: center_abs.0,
+        y: center_abs.1 + (value_y - center.1),
+        font_size: 28.0,
+        color: TITLE_COLOR,
+    });
     for (index, line) in caption_lines.iter().enumerate() {
-        draw_centered_text(
-            &panel,
-            line,
-            center.0,
-            caption_start_y + index as i32 * 14,
-            &caption_style,
-        )?;
+        text_lines.push(MetricOverlayTextLine {
+            text: line.clone(),
+            center_x: center_abs.0,
+            y: center_abs.1 + (caption_start_y + index as i32 * 14 - center.1),
+            font_size: 14.0,
+            color: MUTED_COLOR,
+        });
     }
+    overlays.push(MetricOverlay {
+        center: center_abs,
+        outer_radius: radius,
+        inner_radius: hole_radius,
+        slices: metric.slices.clone(),
+        text_lines,
+    });
 
     let mut current_y = if metric.footer_note.is_some() {
         106
@@ -1120,19 +1136,165 @@ fn prepare_panel<DB: DrawingBackend>(
     Ok(area.clone())
 }
 
-fn draw_centered_text<DB: DrawingBackend>(
-    area: &DrawingArea<DB, Shift>,
-    text: &str,
-    center_x: i32,
-    y: i32,
-    style: &TextStyle<'_>,
-) -> std::result::Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
-    let (text_width, _) = area.estimate_text_size(text, style)?;
-    area.draw(&Text::new(
-        text.to_owned(),
-        (center_x - text_width as i32 / 2, y),
-        style.clone(),
-    ))
+fn inject_metric_overlays(output_path: &Path, overlays: &[MetricOverlay]) -> Result<()> {
+    if overlays.is_empty() {
+        return Ok(());
+    }
+
+    let mut svg = fs::read_to_string(output_path)
+        .with_context(|| format!("failed reading {}", output_path.display()))?;
+    let insertion_point = svg.rfind("</svg>").ok_or_else(|| {
+        anyhow!(
+            "failed locating closing </svg> tag in {}",
+            output_path.display()
+        )
+    })?;
+
+    let mut overlay_markup = String::new();
+    for overlay in overlays {
+        overlay_markup.push_str(&render_metric_overlay_svg(overlay));
+    }
+    svg.insert_str(insertion_point, &overlay_markup);
+
+    fs::write(output_path, svg).with_context(|| format!("failed writing {}", output_path.display()))
+}
+
+fn render_metric_overlay_svg(overlay: &MetricOverlay) -> String {
+    let mut markup = String::from(
+        "\n<g data-role=\"metric-donut-overlay\" shape-rendering=\"geometricPrecision\">\n",
+    );
+    let total: u64 = overlay.slices.iter().map(|slice| slice.value).sum();
+    let mut start_angle = -FRAC_PI_2;
+    for slice in overlay.slices.iter().filter(|slice| slice.value > 0) {
+        let sweep = (slice.value as f64 / total as f64) * TAU;
+        markup.push_str("  <path fill=\"");
+        markup.push_str(&svg_color(slice.color));
+        markup.push_str("\" d=\"");
+        markup.push_str(&donut_slice_path(
+            overlay.center,
+            overlay.outer_radius,
+            overlay.inner_radius,
+            start_angle,
+            start_angle + sweep,
+        ));
+        markup.push_str("\"/>\n");
+        start_angle += sweep;
+    }
+
+    for line in &overlay.text_lines {
+        markup.push_str(&format!(
+            "  <text x=\"{}\" y=\"{}\" dy=\"0.76em\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"{:.6}\" opacity=\"1\" fill=\"{}\">{}</text>\n",
+            line.center_x,
+            line.y,
+            svg_font_size(line.font_size),
+            svg_color(line.color),
+            escape_svg_text(&line.text),
+        ));
+    }
+
+    markup.push_str("</g>\n");
+    markup
+}
+
+fn donut_slice_path(
+    center: (i32, i32),
+    outer_radius: f64,
+    inner_radius: f64,
+    start_angle: f64,
+    end_angle: f64,
+) -> String {
+    let sweep = end_angle - start_angle;
+    if sweep.abs() >= TAU - 1e-6 {
+        return full_ring_path(center, outer_radius, inner_radius, start_angle);
+    }
+
+    let outer_start = polar_point(center, outer_radius, start_angle);
+    let outer_end = polar_point(center, outer_radius, end_angle);
+    let inner_end = polar_point(center, inner_radius, end_angle);
+    let inner_start = polar_point(center, inner_radius, start_angle);
+    let large_arc = if sweep.abs() > std::f64::consts::PI {
+        1
+    } else {
+        0
+    };
+
+    format!(
+        "M {} A {:.3} {:.3} 0 {} 1 {} L {} A {:.3} {:.3} 0 {} 0 {} Z",
+        svg_point(outer_start),
+        outer_radius,
+        outer_radius,
+        large_arc,
+        svg_point(outer_end),
+        svg_point(inner_end),
+        inner_radius,
+        inner_radius,
+        large_arc,
+        svg_point(inner_start),
+    )
+}
+
+fn full_ring_path(
+    center: (i32, i32),
+    outer_radius: f64,
+    inner_radius: f64,
+    start_angle: f64,
+) -> String {
+    let outer_start = polar_point(center, outer_radius, start_angle);
+    let outer_mid = polar_point(center, outer_radius, start_angle + std::f64::consts::PI);
+    let inner_start = polar_point(center, inner_radius, start_angle);
+    let inner_mid = polar_point(center, inner_radius, start_angle + std::f64::consts::PI);
+
+    format!(
+        "M {} A {:.3} {:.3} 0 1 1 {} A {:.3} {:.3} 0 1 1 {} L {} A {:.3} {:.3} 0 1 0 {} A {:.3} {:.3} 0 1 0 {} Z",
+        svg_point(outer_start),
+        outer_radius,
+        outer_radius,
+        svg_point(outer_mid),
+        outer_radius,
+        outer_radius,
+        svg_point(outer_start),
+        svg_point(inner_start),
+        inner_radius,
+        inner_radius,
+        svg_point(inner_mid),
+        inner_radius,
+        inner_radius,
+        svg_point(inner_start),
+    )
+}
+
+fn polar_point(center: (i32, i32), radius: f64, angle: f64) -> (f64, f64) {
+    (
+        center.0 as f64 + radius * angle.cos(),
+        center.1 as f64 + radius * angle.sin(),
+    )
+}
+
+fn svg_point(point: (f64, f64)) -> String {
+    format!("{:.3} {:.3}", point.0, point.1)
+}
+
+fn svg_color(color: RGBColor) -> String {
+    format!("#{:02X}{:02X}{:02X}", color.0, color.1, color.2)
+}
+
+fn svg_font_size(size: f64) -> f64 {
+    size * (25.0 / 31.0)
+}
+
+fn escape_svg_text(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
 }
 
 fn truncate_to_width<DB: DrawingBackend>(
@@ -1413,6 +1575,23 @@ mod tests {
         assert!(svg.contains("Collected vs PubChem"));
         assert!(svg.contains("Executed Request Outcomes"));
         assert!(svg.contains("Direct parent Breakdown"));
+        assert!(svg.contains("data-role=\"metric-donut-overlay\""));
+    }
+
+    #[test]
+    fn donut_slice_path_uses_svg_arcs() {
+        let path = donut_slice_path((320, 240), 96.0, 64.0, -FRAC_PI_2, FRAC_PI_2);
+
+        assert!(path.contains(" A 96.000 96.000 "));
+        assert!(path.contains(" A 64.000 64.000 "));
+    }
+
+    #[test]
+    fn full_ring_path_uses_two_arcs_per_radius() {
+        let path = donut_slice_path((320, 240), 96.0, 64.0, -FRAC_PI_2, -FRAC_PI_2 + TAU);
+
+        assert_eq!(path.matches("A 96.000 96.000").count(), 2);
+        assert_eq!(path.matches("A 64.000 64.000").count(), 2);
     }
 
     #[test]
